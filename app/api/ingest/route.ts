@@ -2,9 +2,12 @@ import { generateText, Output } from "ai";
 import { z } from "zod";
 import { getLanguageModel } from "@/lib/ai/client";
 import { saveDocument, updateProfile, getProfile } from "@/lib/db/queries";
+import { extractPdfText } from "@/lib/pdf/extract";
 import { chunkText, upsertChunks } from "@/lib/rag/vector";
 import { hasAnthropic, hasOpenAI, hasUpstash, hasNeon } from "@/lib/env";
 
+/** PDF.js / unpdf need Node APIs — not Edge. */
+export const runtime = "nodejs";
 export const maxDuration = 60;
 
 async function extractTextFromFile(file: File): Promise<string> {
@@ -21,11 +24,7 @@ async function extractTextFromFile(file: File): Promise<string> {
 
   if (name.endsWith(".pdf") || file.type === "application/pdf") {
     try {
-      const { PDFParse } = await import("pdf-parse");
-      const parser = new PDFParse({ data: new Uint8Array(buf) });
-      const parsed = await parser.getText();
-      await parser.destroy();
-      return parsed.text || "";
+      return await extractPdfText(buf);
     } catch (error) {
       throw new Error(
         `Could not parse PDF (${error instanceof Error ? error.message : "unknown error"}). Try uploading a .txt or .md export.`,
