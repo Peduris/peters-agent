@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { AGENTS } from "@/lib/ai/agent-meta";
 import { ChatPane } from "@/components/chat/ChatPane";
 import { SurfaceSwitcher } from "@/components/SurfaceSwitcher";
@@ -243,6 +244,9 @@ export function AdminShell() {
             <p className="eyebrow">Chatting with</p>
             <h2>{adminAgents.find((a) => a.id === agentId)?.label ?? agentId}</h2>
           </div>
+          <Link className="surface-jump" href="/">
+            ← Public site
+          </Link>
         </header>
         <ChatPane
           surface="admin"

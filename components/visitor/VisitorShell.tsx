@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { ChatPane } from "@/components/chat/ChatPane";
 import { SurfaceSwitcher } from "@/components/SurfaceSwitcher";
 import { DEFAULT_PUBLIC_BIO, visitorGreeting } from "@/lib/ai/copy";
@@ -36,6 +37,15 @@ export function VisitorShell() {
         <p className="greeting-fixed">{visitorGreeting()}</p>
       </aside>
       <main className="visitor-main">
+        <header className="main-header">
+          <div>
+            <p className="eyebrow">Visitor chat</p>
+            <h2>Public Face</h2>
+          </div>
+          <Link className="surface-jump" href="/admin">
+            Open Admin →
+          </Link>
+        </header>
         <ChatPane
           surface="visitor"
           agentId="public-face"
