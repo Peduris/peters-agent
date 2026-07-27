@@ -1,21 +1,30 @@
 {
-  "name": "peters-agent-scaffold",
+  "name": "peters-agent",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:schema": "echo 'Run lib/db/schema.sql against your Neon DATABASE_URL'"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.21",
+    "@ai-sdk/openai": "^4.0.20",
+    "@ai-sdk/react": "^4.0.40",
+    "@neondatabase/serverless": "^1.1.0",
+    "@upstash/vector": "^1.2.3",
+    "ai": "^7.0.37",
     "next": "16.2.12",
+    "pdf-parse": "^2.4.5",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@types/node": "^20.19.43",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
