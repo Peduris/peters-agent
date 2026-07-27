@@ -1,9 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { AGENTS } from "@/lib/ai/agent-meta";
 import { ChatPane } from "@/components/chat/ChatPane";
+import { SurfaceSwitcher } from "@/components/SurfaceSwitcher";
 
 type ProfileResponse = {
   profile: {
@@ -128,10 +128,11 @@ export function AdminShell() {
   return (
     <div className="admin-shell">
       <aside className="admin-sidebar">
+        <SurfaceSwitcher current="admin" />
         <div className="brand-block">
-          <p className="eyebrow">Owner</p>
+          <p className="eyebrow">Owner / training</p>
           <h1>Admin</h1>
-          <p className="muted">Default agent: CEO</p>
+          <p className="muted">Default agent: CEO · no auth yet</p>
         </div>
 
         <nav className="agent-list" aria-label="Agents">
@@ -242,9 +243,6 @@ export function AdminShell() {
             <p className="eyebrow">Chatting with</p>
             <h2>{adminAgents.find((a) => a.id === agentId)?.label ?? agentId}</h2>
           </div>
-          <Link className="text-link" href="/">
-            Open visitor view
-          </Link>
         </header>
         <ChatPane
           surface="admin"

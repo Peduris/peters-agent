@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { ChatPane } from "@/components/chat/ChatPane";
+import { SurfaceSwitcher } from "@/components/SurfaceSwitcher";
 import { DEFAULT_PUBLIC_BIO, visitorGreeting } from "@/lib/ai/copy";
 
 export function VisitorShell() {
@@ -23,6 +24,7 @@ export function VisitorShell() {
   return (
     <div className="visitor-shell">
       <aside className="visitor-sidebar">
+        <SurfaceSwitcher current="visitor" />
         <div className="brand-hero">
           <p className="brand-mark">Peter&apos;s Agent</p>
           <p className="brand-sub">{headline}</p>
