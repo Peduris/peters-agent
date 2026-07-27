@@ -73,8 +73,10 @@ export async function POST(req: Request) {
       upserted = result.upserted;
       ragError = result.error;
     } else {
-      ragError =
-        "Skipping vector upsert — need UPSTASH_VECTOR_* and OPENAI_API_KEY.";
+      const need: string[] = [];
+      if (!hasUpstash()) need.push("UPSTASH_VECTOR_REST_URL/TOKEN");
+      if (!hasOpenAI()) need.push("OPENAI_API_KEY");
+      ragError = `Skipping vector upsert — missing ${need.join(" and ")}.`;
     }
 
     let documentId: string | null = null;

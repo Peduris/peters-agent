@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { AGENTS } from "@/lib/ai/agent-meta";
 import { ChatPane } from "@/components/chat/ChatPane";
@@ -50,9 +51,15 @@ export function AdminShell() {
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const id = setInterval(() => void refresh(), 15000);
-    return () => clearInterval(id);
+    // Defer initial fetch so setState is not synchronous inside the effect body.
+    const timeout = window.setTimeout(() => {
+      void refresh();
+    }, 0);
+    const id = window.setInterval(() => void refresh(), 15000);
+    return () => {
+      window.clearTimeout(timeout);
+      window.clearInterval(id);
+    };
   }, [refresh]);
 
   async function onUpload(file: File | null) {
@@ -235,9 +242,9 @@ export function AdminShell() {
             <p className="eyebrow">Chatting with</p>
             <h2>{adminAgents.find((a) => a.id === agentId)?.label ?? agentId}</h2>
           </div>
-          <a className="text-link" href="/">
+          <Link className="text-link" href="/">
             Open visitor view
-          </a>
+          </Link>
         </header>
         <ChatPane
           surface="admin"
