@@ -39,33 +39,70 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS vector_ids JSONB NOT NULL DEFAULT
 CREATE INDEX IF NOT EXISTS documents_profile_created_idx
   ON documents (profile_id, created_at DESC);
 
+-- Public visitor chat sessions (one thread per browser/visitor)
+CREATE TABLE IF NOT EXISTS visitor_sessions (
+  id TEXT PRIMARY KEY,
+  label TEXT,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'closed')),
+  preview TEXT,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  open_pending_count INTEGER NOT NULL DEFAULT 0,
+  last_message_at TIMESTAMPTZ,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS visitor_sessions_updated_idx
+  ON visitor_sessions (updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   surface TEXT NOT NULL CHECK (surface IN ('admin', 'visitor')),
   agent_id TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
   content TEXT NOT NULL,
+  session_id TEXT,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS session_id TEXT;
+
 CREATE INDEX IF NOT EXISTS messages_surface_agent_created_idx
   ON messages (surface, agent_id, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS messages_session_created_idx
+  ON messages (session_id, created_at ASC);
+
 CREATE TABLE IF NOT EXISTS pending_questions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  source TEXT NOT NULL CHECK (source IN ('public-face', 'internet-researcher', 'ceo', 'system')),
+  source TEXT NOT NULL,
   question TEXT NOT NULL,
   context TEXT,
   status TEXT NOT NULL DEFAULT 'open'
     CHECK (status IN ('open', 'answered', 'dismissed')),
   answer TEXT,
+  visitor_session_id TEXT,
+  public_reply TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   resolved_at TIMESTAMPTZ
 );
 
+-- Safe upgrades for Public ↔ Admin knowledge loop
+ALTER TABLE pending_questions ADD COLUMN IF NOT EXISTS visitor_session_id TEXT;
+ALTER TABLE pending_questions ADD COLUMN IF NOT EXISTS public_reply TEXT;
+ALTER TABLE pending_questions ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- Allow public-orchestrator as a source (drops legacy enum check if present)
+ALTER TABLE pending_questions DROP CONSTRAINT IF EXISTS pending_questions_source_check;
+
 CREATE INDEX IF NOT EXISTS pending_questions_status_created_idx
   ON pending_questions (status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS pending_questions_visitor_session_idx
+  ON pending_questions (visitor_session_id, status, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS agent_runs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -102,5 +139,6 @@ INSERT INTO agents (id, label, enabled, description) VALUES
   ('data-storage', 'Data storage', TRUE, 'Profile modeling, CV + answers → Neon + RAG'),
   ('internet-researcher', 'Internet researcher', TRUE, 'Daily job-market scan from profile'),
   ('next-move-planner', 'Next move planner', TRUE, 'Personalized next steps'),
-  ('public-face', 'Public Face', TRUE, 'Visitor-facing public answers')
+  ('public-face', 'Public Face', TRUE, 'Visitor-facing public answers'),
+  ('public-orchestrator', 'Public orchestrator', TRUE, 'Routes visitor sessions ↔ CEO / Peter')
 ON CONFLICT (id) DO NOTHING;

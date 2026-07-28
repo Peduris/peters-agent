@@ -4,6 +4,7 @@ export const AGENT_IDS = [
   "internet-researcher",
   "next-move-planner",
   "public-face",
+  "public-orchestrator",
 ] as const;
 
 export type AgentId = (typeof AGENT_IDS)[number];
@@ -44,6 +45,12 @@ export const AGENTS: AgentMeta[] = [
     id: "public-face",
     label: "Public Face",
     description: "Visitor-facing (not for admin chat)",
+    adminVisible: false,
+  },
+  {
+    id: "public-orchestrator",
+    label: "Public orchestrator",
+    description: "Routes visitor sessions ↔ CEO (switchboard)",
     adminVisible: false,
   },
 ];

@@ -2,6 +2,7 @@ import {
   listPendingQuestions,
   resolvePendingQuestion,
 } from "@/lib/db/queries";
+import { resolveAndDeliver } from "@/lib/ai/orchestrator";
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -27,6 +28,23 @@ export async function PATCH(req: Request) {
     return Response.json({ error: "Missing id" }, { status: 400 });
   }
 
-  const ok = await resolvePendingQuestion(id, status, answer);
-  return Response.json({ ok });
+  if (status === "dismissed") {
+    const ok = await resolvePendingQuestion(id, "dismissed");
+    return Response.json({ ok });
+  }
+
+  if (!answer?.trim()) {
+    return Response.json(
+      { error: "Provide an answer to resolve and deliver to the visitor session." },
+      { status: 400 },
+    );
+  }
+
+  const result = await resolveAndDeliver({
+    pendingId: id,
+    answer: answer.trim(),
+    storePublicRag: body.storePublicRag !== false,
+  });
+
+  return Response.json(result, { status: result.ok ? 200 : 400 });
 }

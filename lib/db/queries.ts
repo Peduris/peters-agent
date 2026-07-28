@@ -18,7 +18,11 @@ export type PendingQuestion = {
   context: string | null;
   status: string;
   answer: string | null;
+  visitor_session_id: string | null;
+  public_reply: string | null;
+  metadata: Record<string, unknown>;
   created_at: string;
+  resolved_at: string | null;
 };
 
 export type DocumentKind = "cv" | "project" | "note" | "other";
@@ -39,9 +43,46 @@ export type DocumentDetail = DocumentRecord & {
   metadata: Record<string, unknown>;
 };
 
+export type VisitorSession = {
+  id: string;
+  label: string | null;
+  status: string;
+  preview: string | null;
+  message_count: number;
+  open_pending_count: number;
+  last_message_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type StoredMessage = {
+  id: string;
+  surface: string;
+  agent_id: string;
+  role: string;
+  content: string;
+  session_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map(String);
+}
+
+function mapVisitorSession(row: Record<string, unknown>): VisitorSession {
+  return {
+    id: String(row.id),
+    label: (row.label as string) ?? null,
+    status: String(row.status ?? "active"),
+    preview: (row.preview as string) ?? null,
+    message_count: Number(row.message_count ?? 0),
+    open_pending_count: Number(row.open_pending_count ?? 0),
+    last_message_at: row.last_message_at ? String(row.last_message_at) : null,
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  };
 }
 
 export async function ensureProfile(): Promise<Profile | null> {
@@ -236,29 +277,178 @@ export async function deleteDocument(
   }
 }
 
+export async function ensureVisitorSession(
+  sessionId: string,
+  extras?: { label?: string },
+): Promise<VisitorSession | null> {
+  const sql = getSql();
+  if (!sql) return null;
+  const id = sessionId.trim();
+  if (!id) return null;
+  try {
+    const rows = await sql`
+      INSERT INTO visitor_sessions (id, label)
+      VALUES (${id}, ${extras?.label ?? null})
+      ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
+      RETURNING *
+    `;
+    return rows[0] ? mapVisitorSession(rows[0] as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function touchVisitorSession(
+  sessionId: string,
+  input: {
+    preview?: string;
+    bumpMessages?: boolean;
+  },
+): Promise<void> {
+  const sql = getSql();
+  if (!sql) return;
+  const id = sessionId.trim();
+  if (!id) return;
+  try {
+    await ensureVisitorSession(id);
+    const openRows = await sql`
+      SELECT COUNT(*)::int AS c FROM pending_questions
+      WHERE visitor_session_id = ${id} AND status = 'open'
+    `;
+    const openCount = Number(openRows[0]?.c ?? 0);
+    if (input.bumpMessages) {
+      await sql`
+        UPDATE visitor_sessions SET
+          preview = COALESCE(${input.preview ?? null}, preview),
+          message_count = message_count + 1,
+          open_pending_count = ${openCount},
+          last_message_at = NOW(),
+          updated_at = NOW()
+        WHERE id = ${id}
+      `;
+    } else {
+      await sql`
+        UPDATE visitor_sessions SET
+          preview = COALESCE(${input.preview ?? null}, preview),
+          open_pending_count = ${openCount},
+          updated_at = NOW()
+        WHERE id = ${id}
+      `;
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+export async function listVisitorSessions(
+  limit = 50,
+): Promise<VisitorSession[]> {
+  const sql = getSql();
+  if (!sql) return [];
+  try {
+    const rows = await sql`
+      SELECT * FROM visitor_sessions
+      ORDER BY COALESCE(last_message_at, updated_at) DESC
+      LIMIT ${limit}
+    `;
+    return rows.map((row) => mapVisitorSession(row as Record<string, unknown>));
+  } catch {
+    return [];
+  }
+}
+
+export async function getVisitorSession(
+  id: string,
+): Promise<VisitorSession | null> {
+  const sql = getSql();
+  if (!sql) return null;
+  try {
+    const rows = await sql`
+      SELECT * FROM visitor_sessions WHERE id = ${id} LIMIT 1
+    `;
+    return rows[0]
+      ? mapVisitorSession(rows[0] as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function listSessionMessages(
+  sessionId: string,
+  limit = 200,
+): Promise<StoredMessage[]> {
+  const sql = getSql();
+  if (!sql) return [];
+  try {
+    const rows = await sql`
+      SELECT * FROM messages
+      WHERE session_id = ${sessionId}
+      ORDER BY created_at ASC
+      LIMIT ${limit}
+    `;
+    return rows.map((row) => ({
+      id: String(row.id),
+      surface: String(row.surface),
+      agent_id: String(row.agent_id),
+      role: String(row.role),
+      content: String(row.content),
+      session_id: (row.session_id as string) ?? null,
+      metadata: (row.metadata as Record<string, unknown>) ?? {},
+      created_at: String(row.created_at),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export async function saveMessage(input: {
   surface: "admin" | "visitor";
   agentId: string;
   role: "user" | "assistant" | "system";
   content: string;
+  sessionId?: string | null;
   metadata?: Record<string, unknown>;
 }): Promise<void> {
   const sql = getSql();
   if (!sql) return;
   try {
     await sql`
-      INSERT INTO messages (surface, agent_id, role, content, metadata)
+      INSERT INTO messages (surface, agent_id, role, content, session_id, metadata)
       VALUES (
         ${input.surface},
         ${input.agentId},
         ${input.role},
         ${input.content},
+        ${input.sessionId?.trim() || null},
         ${JSON.stringify(input.metadata ?? {})}::jsonb
       )
     `;
+    if (input.surface === "visitor" && input.sessionId) {
+      await touchVisitorSession(input.sessionId, {
+        preview: input.content.slice(0, 160),
+        bumpMessages: true,
+      });
+    }
   } catch {
     // Persistence is best-effort when schema not applied yet
   }
+}
+
+function mapPending(row: Record<string, unknown>): PendingQuestion {
+  return {
+    id: String(row.id),
+    source: String(row.source),
+    question: String(row.question),
+    context: (row.context as string) ?? null,
+    status: String(row.status),
+    answer: (row.answer as string) ?? null,
+    visitor_session_id: (row.visitor_session_id as string) ?? null,
+    public_reply: (row.public_reply as string) ?? null,
+    metadata: (row.metadata as Record<string, unknown>) ?? {},
+    created_at: String(row.created_at),
+    resolved_at: row.resolved_at ? String(row.resolved_at) : null,
+  };
 }
 
 export async function listPendingQuestions(
@@ -271,31 +461,134 @@ export async function listPendingQuestions(
       status === "all"
         ? await sql`SELECT * FROM pending_questions ORDER BY created_at DESC LIMIT 100`
         : await sql`SELECT * FROM pending_questions WHERE status = ${status} ORDER BY created_at DESC LIMIT 100`;
-    return rows.map((row) => ({
-      id: String(row.id),
-      source: String(row.source),
-      question: String(row.question),
-      context: (row.context as string) ?? null,
-      status: String(row.status),
-      answer: (row.answer as string) ?? null,
-      created_at: String(row.created_at),
-    }));
+    return rows.map((row) => mapPending(row as Record<string, unknown>));
   } catch {
     return [];
   }
 }
 
+export async function getPendingQuestion(
+  id: string,
+): Promise<PendingQuestion | null> {
+  const sql = getSql();
+  if (!sql) return null;
+  try {
+    const rows = await sql`
+      SELECT * FROM pending_questions WHERE id = ${id} LIMIT 1
+    `;
+    return rows[0] ? mapPending(rows[0] as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function listVisitorReplies(input: {
+  visitorSessionId: string;
+  includeDelivered?: boolean;
+}): Promise<PendingQuestion[]> {
+  const sql = getSql();
+  if (!sql) return [];
+  const sessionId = input.visitorSessionId.trim();
+  if (!sessionId) return [];
+  try {
+    const rows = await sql`
+      SELECT * FROM pending_questions
+      WHERE visitor_session_id = ${sessionId}
+        AND status = 'answered'
+        AND public_reply IS NOT NULL
+        AND TRIM(public_reply) <> ''
+      ORDER BY resolved_at DESC NULLS LAST, created_at DESC
+      LIMIT 50
+    `;
+    const mapped = rows.map((row) => mapPending(row as Record<string, unknown>));
+    if (input.includeDelivered) return mapped;
+    return mapped.filter((item) => !item.metadata?.delivered_to_visitor);
+  } catch {
+    return [];
+  }
+}
+
+export async function markPendingDelivered(
+  id: string,
+): Promise<boolean> {
+  const sql = getSql();
+  if (!sql) return false;
+  try {
+    await sql`
+      UPDATE pending_questions
+      SET metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({
+        delivered_to_visitor: true,
+        delivered_at: new Date().toISOString(),
+      })}::jsonb
+      WHERE id = ${id}
+    `;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function findOpenPendingDuplicate(input: {
+  question: string;
+  visitorSessionId?: string | null;
+  withinMinutes?: number;
+}): Promise<PendingQuestion | null> {
+  const sql = getSql();
+  if (!sql) return null;
+  const minutes = input.withinMinutes ?? 120;
+  const q = input.question.trim();
+  if (!q) return null;
+  try {
+    const rows = input.visitorSessionId
+      ? await sql`
+          SELECT * FROM pending_questions
+          WHERE status = 'open'
+            AND question = ${q}
+            AND visitor_session_id = ${input.visitorSessionId}
+            AND created_at > NOW() - (${minutes}::text || ' minutes')::interval
+          ORDER BY created_at DESC
+          LIMIT 1
+        `
+      : await sql`
+          SELECT * FROM pending_questions
+          WHERE status = 'open'
+            AND question = ${q}
+            AND created_at > NOW() - (${minutes}::text || ' minutes')::interval
+          ORDER BY created_at DESC
+          LIMIT 1
+        `;
+    return rows[0] ? mapPending(rows[0] as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function createPendingQuestion(input: {
-  source: "public-face" | "internet-researcher" | "ceo" | "system";
+  source:
+    | "public-face"
+    | "internet-researcher"
+    | "ceo"
+    | "system"
+    | "public-orchestrator";
   question: string;
   context?: string;
+  visitorSessionId?: string | null;
+  metadata?: Record<string, unknown>;
 }): Promise<{ id: string } | null> {
   const sql = getSql();
   if (!sql) return null;
   try {
     const rows = await sql`
-      INSERT INTO pending_questions (source, question, context)
-      VALUES (${input.source}, ${input.question}, ${input.context ?? null})
+      INSERT INTO pending_questions (
+        source, question, context, visitor_session_id, metadata
+      )
+      VALUES (
+        ${input.source},
+        ${input.question},
+        ${input.context ?? null},
+        ${input.visitorSessionId?.trim() || null},
+        ${JSON.stringify(input.metadata ?? {})}::jsonb
+      )
       RETURNING id
     `;
     return { id: String(rows[0].id) };
@@ -308,14 +601,26 @@ export async function resolvePendingQuestion(
   id: string,
   status: "answered" | "dismissed",
   answer?: string,
+  extras?: {
+    publicReply?: string;
+    metadata?: Record<string, unknown>;
+  },
 ): Promise<boolean> {
   const sql = getSql();
   if (!sql) return false;
   try {
+    const metaPatch = extras?.metadata
+      ? JSON.stringify(extras.metadata)
+      : null;
     await sql`
       UPDATE pending_questions
       SET status = ${status},
           answer = COALESCE(${answer ?? null}, answer),
+          public_reply = COALESCE(${extras?.publicReply ?? null}, public_reply),
+          metadata = CASE
+            WHEN ${metaPatch}::jsonb IS NULL THEN metadata
+            ELSE COALESCE(metadata, '{}'::jsonb) || ${metaPatch}::jsonb
+          END,
           resolved_at = NOW()
       WHERE id = ${id}
     `;

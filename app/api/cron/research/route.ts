@@ -1,14 +1,5 @@
-import { generateText, Output } from "ai";
-import { z } from "zod";
-import { getLanguageModel } from "@/lib/ai/client";
-import {
-  createAgentRun,
-  createPendingQuestion,
-  getProfile,
-  updateAgentRun,
-} from "@/lib/db/queries";
-import { upsertChunks } from "@/lib/rag/vector";
-import { env, hasAnthropic, hasOpenAI, hasUpstash } from "@/lib/env";
+import { runInternetResearch } from "@/lib/ai/research";
+import { env } from "@/lib/env";
 
 export const maxDuration = 60;
 
@@ -22,107 +13,26 @@ function authorize(req: Request): boolean {
 }
 
 async function runResearch() {
-  if (!hasAnthropic()) {
-    return {
-      ok: false,
-      error: "ANTHROPIC_API_KEY missing",
-    };
-  }
-
-  const profile = await getProfile();
-  const runId = await createAgentRun({
-    agentId: "internet-researcher",
+  const result = await runInternetResearch({
+    brief:
+      "Daily job-market and skills scan driven by Peter's current profile and goals. Identify demand signals, skill gaps, and positioning notes.",
     kind: "daily-market-scan",
-    status: "running",
-    input: { profileId: profile?.id ?? "peter" },
+    persistRag: true,
+    persistFollowUps: true,
   });
 
-  try {
-    const { output } = await generateText({
-      model: getLanguageModel(),
-      output: Output.object({
-        schema: z.object({
-          focus: z.string(),
-          findings: z.array(z.string()).min(3).max(12),
-          gaps: z.array(z.string()).min(1).max(8),
-          followUps: z.array(z.string()).min(1).max(3),
-          reportMarkdown: z.string(),
-        }),
-      }),
-      prompt: `You are Peter's Internet researcher running a daily job-market scan.
-Use the profile snapshot below. Live web search may be unavailable — be explicit about uncertainty and focus on actionable gaps vs the profile.
-
-Profile:
-${JSON.stringify(
-  {
-    full_name: profile?.full_name,
-    headline: profile?.headline,
-    structured: profile?.structured,
-    onboarding_answers: profile?.onboarding_answers,
-    onboarding_questions: profile?.onboarding_questions,
-  },
-  null,
-  2,
-)}
-
-Return focus, findings, gaps, 1-3 CEO follow-up questions, and a short markdown report.`,
-    });
-
-    if (!output) {
-      throw new Error("No structured research output");
-    }
-
-    for (const question of output.followUps) {
-      await createPendingQuestion({
-        source: "internet-researcher",
-        question,
-        context: `Daily research focus: ${output.focus}`,
-      });
-    }
-
-    if (hasUpstash() && hasOpenAI()) {
-      await upsertChunks([
-        {
-          id: `research-${Date.now()}`,
-          text: output.reportMarkdown,
-          visibility: "private",
-          source: "internet-researcher",
-          kind: "research-report",
-        },
-      ]);
-    }
-
-    if (runId) {
-      await updateAgentRun(runId, {
-        status: "succeeded",
-        output: {
-          focus: output.focus,
-          findings: output.findings,
-          gaps: output.gaps,
-          followUps: output.followUps,
-          reportMarkdown: output.reportMarkdown,
-        },
-      });
-    }
-
-    return {
-      ok: true,
-      focus: output.focus,
-      followUps: output.followUps,
-      findingsCount: output.findings.length,
-    };
-  } catch (error) {
-    if (runId) {
-      await updateAgentRun(runId, {
-        status: "failed",
-        error: error instanceof Error ? error.message : "Research failed",
-      });
-    }
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "Research failed",
-    };
+  if (!result.ok) {
+    return { ok: false, error: result.error };
   }
+
+  return {
+    ok: true,
+    focus: result.output.focus,
+    followUps: result.output.followUps,
+    findingsCount: result.output.findings.length,
+    ragUpserted: result.ragUpserted,
+    pendingQueued: result.pendingQueued,
+  };
 }
 
 export async function GET(req: Request) {

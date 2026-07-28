@@ -6,11 +6,37 @@ import { ChatPane } from "@/components/chat/ChatPane";
 import { SurfaceSwitcher } from "@/components/SurfaceSwitcher";
 import { DEFAULT_PUBLIC_BIO, visitorGreeting } from "@/lib/ai/copy";
 
+const SESSION_KEY = "peters-agent-visitor-session";
+
+function getOrCreateSessionId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    const existing = window.localStorage.getItem(SESSION_KEY);
+    if (existing) return existing;
+    const id = crypto.randomUUID();
+    window.localStorage.setItem(SESSION_KEY, id);
+    return id;
+  } catch {
+    return crypto.randomUUID();
+  }
+}
+
 export function VisitorShell() {
   const [bio, setBio] = useState(DEFAULT_PUBLIC_BIO);
   const [headline, setHeadline] = useState("Peter's Agent");
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
   useEffect(() => {
+    const id = getOrCreateSessionId();
+    setSessionId(id);
+    void fetch("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }).catch(() => {
+      /* session create is best-effort */
+    });
+
     void fetch("/api/profile")
       .then((r) => r.json())
       .then((data) => {
@@ -21,6 +47,21 @@ export function VisitorShell() {
         /* keep defaults */
       });
   }, []);
+
+  function startNewSession() {
+    const id = crypto.randomUUID();
+    try {
+      window.localStorage.setItem(SESSION_KEY, id);
+    } catch {
+      /* ignore */
+    }
+    setSessionId(id);
+    void fetch("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+  }
 
   return (
     <div className="visitor-shell">
@@ -35,6 +76,12 @@ export function VisitorShell() {
           <p>{bio}</p>
         </div>
         <p className="greeting-fixed">{visitorGreeting()}</p>
+        <button type="button" className="ghost session-new" onClick={startNewSession}>
+          New chat session
+        </button>
+        {sessionId ? (
+          <p className="session-id muted">Session {sessionId.slice(0, 8)}…</p>
+        ) : null}
       </aside>
       <main className="visitor-main">
         <header className="main-header">
@@ -46,12 +93,19 @@ export function VisitorShell() {
             Open Admin →
           </Link>
         </header>
-        <ChatPane
-          surface="visitor"
-          agentId="public-face"
-          placeholder="Ask Peter's Agent…"
-          emptyHint={visitorGreeting()}
-        />
+        {sessionId ? (
+          <ChatPane
+            surface="visitor"
+            agentId="public-face"
+            visitorSessionId={sessionId}
+            pollDeliveries
+            resetKey={sessionId}
+            placeholder="Ask Peter's Agent…"
+            emptyHint={visitorGreeting()}
+          />
+        ) : (
+          <p className="chat-empty">Starting your session…</p>
+        )}
       </main>
     </div>
   );

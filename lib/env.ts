@@ -12,7 +12,8 @@ function read(name: string): string | undefined {
 export const env = {
   anthropicApiKey: () => read("ANTHROPIC_API_KEY"),
   openaiApiKey: () => read("OPENAI_API_KEY"),
-  databaseUrl: () => read("DATABASE_URL"),
+  /** Neon connection string — prefer DATABASE_URL, fall back to Marketplace POSTGRES_URL. */
+  databaseUrl: () => read("DATABASE_URL") || read("POSTGRES_URL"),
   upstashVectorUrl: () => read("UPSTASH_VECTOR_REST_URL"),
   upstashVectorToken: () => read("UPSTASH_VECTOR_REST_TOKEN"),
   cronSecret: () => read("CRON_SECRET"),

@@ -17,6 +17,9 @@ type Props = {
   placeholder?: string;
   emptyHint?: string;
   resetKey?: string;
+  visitorSessionId?: string | null;
+  /** When true, poll for orchestrator-delivered replies into this thread. */
+  pollDeliveries?: boolean;
 };
 
 export function ChatPane({
@@ -25,34 +28,87 @@ export function ChatPane({
   placeholder = "Message…",
   emptyHint,
   resetKey,
+  visitorSessionId,
+  pollDeliveries = false,
 }: Props) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const deliveredIds = useRef<Set<string>>(new Set());
 
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
         api: "/api/chat",
-        body: { surface, agentId },
+        body: {
+          surface,
+          agentId,
+          ...(visitorSessionId ? { visitorSessionId } : {}),
+        },
       }),
-    [surface, agentId],
+    [surface, agentId, visitorSessionId],
   );
 
   const { messages, sendMessage, status, setMessages, error, clearError } =
     useChat({
-      id: `${surface}-${agentId}-${resetKey ?? "default"}`,
+      id: `${surface}-${agentId}-${resetKey ?? visitorSessionId ?? "default"}`,
       transport,
     });
 
   useEffect(() => {
     setMessages([]);
     clearError?.();
+    deliveredIds.current = new Set();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentId, resetKey]);
+  }, [agentId, resetKey, visitorSessionId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, status]);
+
+  useEffect(() => {
+    if (!pollDeliveries || !visitorSessionId) return;
+
+    let cancelled = false;
+
+    async function pullReplies() {
+      try {
+        const res = await fetch(
+          `/api/sessions?id=${encodeURIComponent(visitorSessionId!)}&replies=1&markDelivered=1`,
+        );
+        const data = await res.json();
+        const replies = (data.replies ?? []) as Array<{
+          id: string;
+          publicReply: string;
+        }>;
+        if (cancelled || replies.length === 0) return;
+
+        const fresh = replies.filter(
+          (r) => r.publicReply && !deliveredIds.current.has(r.id),
+        );
+        if (fresh.length === 0) return;
+
+        for (const r of fresh) deliveredIds.current.add(r.id);
+
+        setMessages((prev) => [
+          ...prev,
+          ...fresh.map((r) => ({
+            id: `delivery-${r.id}`,
+            role: "assistant" as const,
+            parts: [{ type: "text" as const, text: r.publicReply }],
+          })),
+        ]);
+      } catch {
+        /* ignore poll errors */
+      }
+    }
+
+    void pullReplies();
+    const timer = window.setInterval(() => void pullReplies(), 8000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pollDeliveries, visitorSessionId, setMessages]);
 
   const busy = status === "submitted" || status === "streaming";
 
@@ -76,7 +132,11 @@ export function ChatPane({
             className={`bubble ${message.role === "user" ? "user" : "assistant"}`}
           >
             <span className="bubble-role">
-              {message.role === "user" ? "You" : surface === "visitor" ? "Peter's Agent" : agentId}
+              {message.role === "user"
+                ? "You"
+                : surface === "visitor"
+                  ? "Peter's Agent"
+                  : agentId}
             </span>
             <div className="bubble-text">{messageText(message)}</div>
           </article>
