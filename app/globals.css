@@ -569,6 +569,11 @@ a {
   gap: 0.65rem;
 }
 
+.pending-actions {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
 .qa {
   display: flex;
   flex-direction: column;
