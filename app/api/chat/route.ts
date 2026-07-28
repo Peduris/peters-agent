@@ -21,6 +21,7 @@ import {
   createPendingQuestion,
   ensureVisitorSession,
   findAwaitingAdminEscalation,
+  flagVisitorInterest,
   getProfile,
   listPendingQuestions,
   resolvePendingQuestion,
@@ -29,6 +30,10 @@ import {
 } from "@/lib/db/queries";
 import { formatHitsForPrompt, queryRag } from "@/lib/rag/vector";
 import { hasAnthropic } from "@/lib/env";
+import {
+  classifyVisitorInterest,
+  shouldFlagInterest,
+} from "@/lib/ai/interest";
 
 export const maxDuration = 120;
 
@@ -102,6 +107,14 @@ export async function POST(req: Request) {
       sessionId:
         surface === "visitor" ? visitorSessionId : adminSessionId,
     });
+
+    // Flag high-signal visitor threads (recruiting / interview / etc.)
+    if (surface === "visitor" && visitorSessionId) {
+      const interest = classifyVisitorInterest(userText);
+      if (shouldFlagInterest(interest)) {
+        await flagVisitorInterest(visitorSessionId, interest);
+      }
+    }
   }
 
   // Primary path: Peter answers a visitor escalation directly in the CEO chat.

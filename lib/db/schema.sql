@@ -48,14 +48,26 @@ CREATE TABLE IF NOT EXISTS visitor_sessions (
   preview TEXT,
   message_count INTEGER NOT NULL DEFAULT 0,
   open_pending_count INTEGER NOT NULL DEFAULT 0,
+  interest_flag BOOLEAN NOT NULL DEFAULT FALSE,
+  interest_score REAL NOT NULL DEFAULT 0,
+  interest_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
   last_message_at TIMESTAMPTZ,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Safe upgrades for attention / interest filter
+ALTER TABLE visitor_sessions ADD COLUMN IF NOT EXISTS interest_flag BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE visitor_sessions ADD COLUMN IF NOT EXISTS interest_score REAL NOT NULL DEFAULT 0;
+ALTER TABLE visitor_sessions ADD COLUMN IF NOT EXISTS interest_reasons JSONB NOT NULL DEFAULT '[]'::jsonb;
+
 CREATE INDEX IF NOT EXISTS visitor_sessions_updated_idx
   ON visitor_sessions (updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS visitor_sessions_attention_idx
+  ON visitor_sessions (updated_at DESC)
+  WHERE open_pending_count > 0 OR interest_flag = TRUE;
 
 CREATE TABLE IF NOT EXISTS messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

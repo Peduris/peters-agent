@@ -1,11 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { AGENTS } from "@/lib/ai/agent-meta";
 import { ChatPane } from "@/components/chat/ChatPane";
-import { SurfaceSwitcher } from "@/components/SurfaceSwitcher";
 import { KnowledgePanel } from "@/components/admin/KnowledgePanel";
+import {
+  ConversationsPanel,
+  type ConversationsFilter,
+} from "@/components/admin/ConversationsPanel";
 import { ADMIN_CEO_SESSION_ID } from "@/lib/ai/session-ids";
 
 type ProfileResponse = {
@@ -37,22 +40,32 @@ type VisitorSessionItem = {
   preview: string | null;
   message_count: number;
   open_pending_count: number;
+  interest_flag?: boolean;
+  interest_score?: number;
+  interest_reasons?: string[];
+  needs_attention?: boolean;
   last_message_at: string | null;
   updated_at: string;
 };
 
-type AdminView = "chat" | "knowledge";
+type AdminView = "chat" | "knowledge" | "conversations";
 
 const adminAgents = AGENTS.filter((a) => a.adminVisible);
 
 export function AdminShell() {
   const [view, setView] = useState<AdminView>("chat");
+  const [conversationsFilter, setConversationsFilter] =
+    useState<ConversationsFilter>("attention");
   const [agentId, setAgentId] = useState("ceo");
-  const [profile, setProfile] = useState<ProfileResponse["profile"] | null>(null);
+  const [profile, setProfile] = useState<ProfileResponse["profile"] | null>(
+    null,
+  );
   const [missing, setMissing] = useState<string[]>([]);
   const [pending, setPending] = useState<PendingItem[]>([]);
   const [sessions, setSessions] = useState<VisitorSessionItem[]>([]);
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    null,
+  );
   const [sessionMessages, setSessionMessages] = useState<
     Array<{ id: string; role: string; content: string; created_at: string }>
   >([]);
@@ -60,7 +73,9 @@ export function AdminShell() {
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const [answers, setAnswers] = useState<string[]>(["", "", "", "", ""]);
   const [savingAnswers, setSavingAnswers] = useState(false);
-  const [onboardingSummary, setOnboardingSummary] = useState<string | null>(null);
+  const [onboardingSummary, setOnboardingSummary] = useState<string | null>(
+    null,
+  );
 
   const refresh = useCallback(async () => {
     const [profileRes, pendingRes, sessionsRes] = await Promise.all([
@@ -173,32 +188,46 @@ export function AdminShell() {
     (profile.onboarding_state === "questions_asked" ||
       (questions.length === 5 && profile.onboarding_state !== "complete"));
 
+  const attentionSessions = useMemo(
+    () =>
+      sessions.filter(
+        (s) =>
+          s.needs_attention ||
+          s.open_pending_count > 0 ||
+          Boolean(s.interest_flag),
+      ),
+    [sessions],
+  );
+
+  const listedSessions =
+    view === "conversations" && conversationsFilter === "attention"
+      ? attentionSessions
+      : sessions;
+
+  const headerTitle =
+    view === "chat"
+      ? (adminAgents.find((a) => a.id === agentId)?.label ?? agentId)
+      : view === "knowledge"
+        ? "Profile / Knowledge"
+        : conversationsFilter === "attention"
+          ? "Requiring attention"
+          : "All Agent runs";
+
+  const headerEyebrow =
+    view === "chat"
+      ? "Chatting with"
+      : view === "knowledge"
+        ? "Owner library"
+        : "AI conversations";
+
   return (
     <div className="admin-shell">
       <aside className="admin-sidebar">
-        <SurfaceSwitcher current="admin" />
         <div className="brand-block">
           <p className="eyebrow">Owner / training</p>
           <h1>Admin</h1>
           <p className="muted">Default agent: CEO · no auth yet</p>
         </div>
-
-        <nav className="admin-view-switch" aria-label="Admin sections">
-          <button
-            type="button"
-            className={view === "chat" ? "active" : ""}
-            onClick={() => setView("chat")}
-          >
-            Chat
-          </button>
-          <button
-            type="button"
-            className={view === "knowledge" ? "active" : ""}
-            onClick={() => setView("knowledge")}
-          >
-            Profile / Knowledge
-          </button>
-        </nav>
 
         {view === "chat" ? (
           <>
@@ -217,16 +246,16 @@ export function AdminShell() {
             </nav>
 
             <section className="panel">
-              <h2>Visitor sessions ({sessions.length})</h2>
+              <h2>Recent visitors ({sessions.length})</h2>
               <p className="muted panel-hint">
-                Each public visitor has their own thread. Escalations land in CEO
-                chat.
+                Full inbox lives under AI conversations. Escalations still land
+                in CEO chat.
               </p>
               {sessions.length === 0 ? (
                 <p className="muted">No visitor sessions yet.</p>
               ) : (
                 <ul className="session-list">
-                  {sessions.map((s) => (
+                  {sessions.slice(0, 8).map((s) => (
                     <li key={s.id}>
                       <button
                         type="button"
@@ -235,13 +264,23 @@ export function AdminShell() {
                             ? "session-item active"
                             : "session-item"
                         }
-                        onClick={() => void openSession(s.id)}
+                        onClick={() => {
+                          setView("conversations");
+                          setConversationsFilter(
+                            s.open_pending_count > 0 || s.interest_flag
+                              ? "attention"
+                              : "all",
+                          );
+                          void openSession(s.id);
+                        }}
                       >
                         <span className="session-item-id">
                           {s.id.slice(0, 8)}…
                           {s.open_pending_count > 0
                             ? ` · ${s.open_pending_count} open`
-                            : ""}
+                            : s.interest_flag
+                              ? " · interesting"
+                              : ""}
                         </span>
                         <span className="session-item-preview">
                           {s.preview || `${s.message_count} messages`}
@@ -251,24 +290,6 @@ export function AdminShell() {
                   ))}
                 </ul>
               )}
-              {selectedSessionId ? (
-                <div className="session-thread">
-                  <p className="pending-meta">Thread {selectedSessionId.slice(0, 8)}…</p>
-                  {sessionMessages.length === 0 ? (
-                    <p className="muted">No messages yet.</p>
-                  ) : (
-                    <ul className="session-msgs">
-                      {sessionMessages.slice(-12).map((m) => (
-                        <li key={m.id}>
-                          <strong>{m.role === "user" ? "Visitor" : "Agent"}:</strong>{" "}
-                          {m.content.slice(0, 180)}
-                          {m.content.length > 180 ? "…" : ""}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              ) : null}
             </section>
 
             <section className="panel">
@@ -362,15 +383,45 @@ export function AdminShell() {
               )}
             </section>
           </>
-        ) : (
+        ) : null}
+
+        {view === "conversations" ? (
+          <section className="panel">
+            <h2>Session context</h2>
+            <p className="muted panel-hint">
+              Open a thread in the main pane. Use CEO chat when a visitor is
+              waiting on your reply.
+            </p>
+            {attentionSessions.length > 0 ? (
+              <p className="panel-note">
+                {attentionSessions.length} conversation
+                {attentionSessions.length === 1 ? "" : "s"} need attention.
+              </p>
+            ) : (
+              <p className="muted">Attention queue is clear.</p>
+            )}
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => {
+                setView("chat");
+                setAgentId("ceo");
+              }}
+            >
+              Open CEO chat
+            </button>
+          </section>
+        ) : null}
+
+        {view === "knowledge" ? (
           <section className="panel">
             <h2>Knowledge</h2>
             <p className="muted">
-              Review what is vectorized, add files with a description, or delete stale
-              sources. Chat stays available on the other tab.
+              Review what is vectorized, add files with a description, or delete
+              stale sources. Chat stays available from the top menu.
             </p>
           </section>
-        )}
+        ) : null}
 
         {missing.length > 0 ? (
           <section className="panel warn">
@@ -385,20 +436,42 @@ export function AdminShell() {
       </aside>
 
       <main className="admin-main">
-        <header className="main-header">
-          <div>
-            <p className="eyebrow">
-              {view === "chat" ? "Chatting with" : "Owner library"}
-            </p>
-            <h2>
-              {view === "chat"
-                ? (adminAgents.find((a) => a.id === agentId)?.label ?? agentId)
-                : "Profile / Knowledge"}
-            </h2>
+        <header className="main-header admin-main-header">
+          <div className="admin-header-title">
+            <p className="eyebrow">{headerEyebrow}</p>
+            <h2>{headerTitle}</h2>
           </div>
-          <Link className="surface-jump" href="/">
-            ← Public site
-          </Link>
+          <div className="admin-header-actions">
+            <nav className="admin-top-nav" aria-label="Admin sections">
+              <button
+                type="button"
+                className={view === "chat" ? "active" : ""}
+                onClick={() => setView("chat")}
+              >
+                Chat
+              </button>
+              <button
+                type="button"
+                className={view === "knowledge" ? "active" : ""}
+                onClick={() => setView("knowledge")}
+              >
+                Profile / Knowledge
+              </button>
+              <button
+                type="button"
+                className={view === "conversations" ? "active" : ""}
+                onClick={() => setView("conversations")}
+              >
+                AI conversations
+                {attentionSessions.length > 0 ? (
+                  <span className="nav-badge">{attentionSessions.length}</span>
+                ) : null}
+              </button>
+            </nav>
+            <Link className="surface-jump" href="/">
+              ← Public site
+            </Link>
+          </div>
         </header>
 
         {view === "chat" ? (
@@ -420,9 +493,29 @@ export function AdminShell() {
                 : "Switch to CEO to handle visitor escalations."
             }
           />
-        ) : (
-          <KnowledgePanel />
-        )}
+        ) : null}
+
+        {view === "knowledge" ? <KnowledgePanel /> : null}
+
+        {view === "conversations" ? (
+          <ConversationsPanel
+            filter={conversationsFilter}
+            onFilterChange={(f) => {
+              setConversationsFilter(f);
+              setSelectedSessionId(null);
+              setSessionMessages([]);
+            }}
+            sessions={listedSessions}
+            selectedSessionId={selectedSessionId}
+            sessionMessages={sessionMessages}
+            onOpenSession={(id) => void openSession(id)}
+            onOpenCeoChat={() => {
+              setView("chat");
+              setAgentId("ceo");
+            }}
+            attentionCount={attentionSessions.length}
+          />
+        ) : null}
       </main>
     </div>
   );

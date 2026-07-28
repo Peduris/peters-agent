@@ -1,8 +1,11 @@
 # Peter's Agent — repo notes for coding agents
 
 ## Product surfaces
-- `/` — visitor chat (Public Face only), brand **Peter's Agent**
-- `/admin` — owner multi-agent chat (default CEO), **Profile / Knowledge** library, CV upload, 5Q onboarding, pending inbox
+- `/` — visitor chat (Public Face only), brand **Peter's Agent**; header jump **Open Admin →**
+- `/admin` — owner workspace with top menu: **Chat**, **Profile / Knowledge**, **AI conversations**; header jump **← Public site**
+  - Chat: multi-agent (default CEO), sidebar agents + session context, sticky composer, escalations in CEO chat
+  - Profile / Knowledge: document library, CV upload, 5Q onboarding
+  - AI conversations: **All Agent runs** + **Conversations requiring my attention** (open pending OR interest flag)
 
 ## Agent skills
 Behavior contracts live in `agents/<name>/SKILL.md` and are loaded server-side into system prompts.

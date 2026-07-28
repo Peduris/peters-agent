@@ -13,6 +13,9 @@ export async function GET(req: Request) {
   const includeMessages = searchParams.get("messages") === "1";
   const replies = searchParams.get("replies") === "1";
   const markDelivered = searchParams.get("markDelivered") === "1";
+  const attentionOnly =
+    searchParams.get("attention") === "1" ||
+    searchParams.get("filter") === "attention";
 
   if (id) {
     const session = await getVisitorSession(id);
@@ -49,7 +52,7 @@ export async function GET(req: Request) {
     });
   }
 
-  const sessions = await listVisitorSessions(60);
+  const sessions = await listVisitorSessions(60, { attentionOnly });
   return Response.json({ sessions });
 }
 

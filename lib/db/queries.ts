@@ -50,9 +50,14 @@ export type VisitorSession = {
   preview: string | null;
   message_count: number;
   open_pending_count: number;
+  interest_flag: boolean;
+  interest_score: number;
+  interest_reasons: string[];
   last_message_at: string | null;
   created_at: string;
   updated_at: string;
+  /** Derived: open pending OR interesting/high-signal. */
+  needs_attention: boolean;
 };
 
 export type StoredMessage = {
@@ -72,16 +77,22 @@ function asStringArray(value: unknown): string[] {
 }
 
 function mapVisitorSession(row: Record<string, unknown>): VisitorSession {
+  const openPending = Number(row.open_pending_count ?? 0);
+  const interestFlag = Boolean(row.interest_flag);
   return {
     id: String(row.id),
     label: (row.label as string) ?? null,
     status: String(row.status ?? "active"),
     preview: (row.preview as string) ?? null,
     message_count: Number(row.message_count ?? 0),
-    open_pending_count: Number(row.open_pending_count ?? 0),
+    open_pending_count: openPending,
+    interest_flag: interestFlag,
+    interest_score: Number(row.interest_score ?? 0),
+    interest_reasons: asStringArray(row.interest_reasons),
     last_message_at: row.last_message_at ? String(row.last_message_at) : null,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
+    needs_attention: openPending > 0 || interestFlag,
   };
 }
 
@@ -342,18 +353,59 @@ export async function touchVisitorSession(
 
 export async function listVisitorSessions(
   limit = 50,
+  opts?: { attentionOnly?: boolean },
 ): Promise<VisitorSession[]> {
   const sql = getSql();
   if (!sql) return [];
   try {
-    const rows = await sql`
-      SELECT * FROM visitor_sessions
-      ORDER BY COALESCE(last_message_at, updated_at) DESC
-      LIMIT ${limit}
-    `;
+    const rows = opts?.attentionOnly
+      ? await sql`
+          SELECT * FROM visitor_sessions
+          WHERE open_pending_count > 0 OR interest_flag = TRUE
+          ORDER BY COALESCE(last_message_at, updated_at) DESC
+          LIMIT ${limit}
+        `
+      : await sql`
+          SELECT * FROM visitor_sessions
+          ORDER BY COALESCE(last_message_at, updated_at) DESC
+          LIMIT ${limit}
+        `;
     return rows.map((row) => mapVisitorSession(row as Record<string, unknown>));
   } catch {
     return [];
+  }
+}
+
+/** Persist interest classification; keeps the highest score / union of reasons. */
+export async function flagVisitorInterest(
+  sessionId: string,
+  input: { score: number; reasons: string[] },
+): Promise<VisitorSession | null> {
+  const sql = getSql();
+  if (!sql) return null;
+  const id = sessionId.trim();
+  if (!id || input.score <= 0 || input.reasons.length === 0) return null;
+  try {
+    await ensureVisitorSession(id);
+    const current = await getVisitorSession(id);
+    const mergedReasons = Array.from(
+      new Set([...(current?.interest_reasons ?? []), ...input.reasons]),
+    );
+    const nextScore = Math.max(current?.interest_score ?? 0, input.score);
+    const rows = await sql`
+      UPDATE visitor_sessions SET
+        interest_flag = TRUE,
+        interest_score = ${nextScore},
+        interest_reasons = ${JSON.stringify(mergedReasons)}::jsonb,
+        updated_at = NOW()
+      WHERE id = ${id}
+      RETURNING *
+    `;
+    return rows[0]
+      ? mapVisitorSession(rows[0] as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
   }
 }
 

@@ -4,6 +4,7 @@ import { loadSkillMarkdown } from "@/lib/ai/agents";
 import {
   createPendingQuestion,
   findOpenPendingDuplicate,
+  flagVisitorInterest,
   getPendingQuestion,
   listPendingQuestions,
   resolvePendingQuestion,
@@ -14,6 +15,10 @@ import {
 import { upsertChunks } from "@/lib/rag/vector";
 import { hasAnthropic, hasOpenAI, hasUpstash } from "@/lib/env";
 import { ADMIN_CEO_SESSION_ID } from "@/lib/ai/session-ids";
+import {
+  classifyVisitorInterest,
+  shouldFlagInterest,
+} from "@/lib/ai/interest";
 
 export { ADMIN_CEO_SESSION_ID } from "@/lib/ai/session-ids";
 
@@ -104,6 +109,11 @@ export async function escalateToAdmin(input: {
   });
 
   if (!created) return { ok: false, skipped: "persist-failed" };
+
+  const interest = classifyVisitorInterest(question);
+  if (shouldFlagInterest(interest)) {
+    await flagVisitorInterest(input.visitorSessionId, interest);
+  }
 
   await touchVisitorSession(input.visitorSessionId, {
     preview: `Escalated: ${question.slice(0, 120)}`,

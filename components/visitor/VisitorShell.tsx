@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ChatPane } from "@/components/chat/ChatPane";
-import { SurfaceSwitcher } from "@/components/SurfaceSwitcher";
 import { DEFAULT_PUBLIC_BIO, visitorGreeting } from "@/lib/ai/copy";
 
 import { VISITOR_SESSION_STORAGE_KEY } from "@/lib/ai/session-ids";
@@ -68,7 +67,6 @@ export function VisitorShell() {
   return (
     <div className="visitor-shell">
       <aside className="visitor-sidebar">
-        <SurfaceSwitcher current="visitor" />
         <div className="brand-hero">
           <p className="brand-mark">Peter&apos;s Agent</p>
           <p className="brand-sub">{headline}</p>
