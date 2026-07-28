@@ -21,6 +21,24 @@ export type PendingQuestion = {
   created_at: string;
 };
 
+export type DocumentKind = "cv" | "project" | "note" | "other";
+
+export type DocumentRecord = {
+  id: string;
+  kind: DocumentKind;
+  filename: string;
+  mime_type: string | null;
+  description: string | null;
+  chunk_count: number;
+  vector_ids: string[];
+  created_at: string;
+};
+
+export type DocumentDetail = DocumentRecord & {
+  content_text: string;
+  metadata: Record<string, unknown>;
+};
+
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map(String);
@@ -102,28 +120,120 @@ export async function updateProfile(fields: {
   return rows[0] ? mapProfile(rows[0] as Record<string, unknown>) : null;
 }
 
+function mapDocument(row: Record<string, unknown>): DocumentRecord {
+  return {
+    id: String(row.id),
+    kind: (String(row.kind || "other") as DocumentKind) || "other",
+    filename: String(row.filename),
+    mime_type: (row.mime_type as string) ?? null,
+    description: (row.description as string) ?? null,
+    chunk_count: Number(row.chunk_count ?? 0),
+    vector_ids: asStringArray(row.vector_ids),
+    created_at: String(row.created_at),
+  };
+}
+
+const DOCUMENT_KINDS = new Set(["cv", "project", "note", "other"]);
+
+function normalizeKind(kind?: string): DocumentKind {
+  if (kind && DOCUMENT_KINDS.has(kind)) return kind as DocumentKind;
+  return "other";
+}
+
 export async function saveDocument(input: {
+  id?: string;
   filename: string;
   mimeType?: string;
   contentText: string;
   chunkCount: number;
   kind?: string;
+  description?: string | null;
+  vectorIds?: string[];
+  metadata?: Record<string, unknown>;
 }): Promise<{ id: string } | { error: string }> {
   const sql = getSql();
   if (!sql) return { error: dbUnavailableMessage() };
   await ensureProfile();
+  const id = input.id ?? crypto.randomUUID();
+  const kind = normalizeKind(input.kind);
   const rows = await sql`
-    INSERT INTO documents (filename, mime_type, content_text, chunk_count, kind)
+    INSERT INTO documents (
+      id, filename, mime_type, content_text, chunk_count, kind,
+      description, vector_ids, metadata
+    )
     VALUES (
+      ${id},
       ${input.filename},
       ${input.mimeType ?? null},
       ${input.contentText},
       ${input.chunkCount},
-      ${input.kind ?? "cv"}
+      ${kind},
+      ${input.description?.trim() || null},
+      ${JSON.stringify(input.vectorIds ?? [])}::jsonb,
+      ${JSON.stringify(input.metadata ?? {})}::jsonb
     )
     RETURNING id
   `;
   return { id: String(rows[0].id) };
+}
+
+export async function listDocuments(): Promise<DocumentRecord[]> {
+  const sql = getSql();
+  if (!sql) return [];
+  try {
+    const rows = await sql`
+      SELECT id, kind, filename, mime_type, description, chunk_count,
+             vector_ids, created_at
+      FROM documents
+      WHERE profile_id = 'peter'
+      ORDER BY created_at DESC
+      LIMIT 200
+    `;
+    return rows.map((row) => mapDocument(row as Record<string, unknown>));
+  } catch {
+    return [];
+  }
+}
+
+export async function getDocument(
+  id: string,
+): Promise<DocumentDetail | null> {
+  const sql = getSql();
+  if (!sql) return null;
+  try {
+    const rows = await sql`
+      SELECT * FROM documents WHERE id = ${id} LIMIT 1
+    `;
+    const row = rows[0] as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      ...mapDocument(row),
+      content_text: String(row.content_text ?? ""),
+      metadata: (row.metadata as Record<string, unknown>) ?? {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteDocument(
+  id: string,
+): Promise<{ deleted: boolean; vectorIds: string[] }> {
+  const sql = getSql();
+  if (!sql) return { deleted: false, vectorIds: [] };
+  try {
+    const rows = await sql`
+      DELETE FROM documents WHERE id = ${id}
+      RETURNING vector_ids
+    `;
+    if (!rows[0]) return { deleted: false, vectorIds: [] };
+    return {
+      deleted: true,
+      vectorIds: asStringArray(rows[0].vector_ids),
+    };
+  } catch {
+    return { deleted: false, vectorIds: [] };
+  }
 }
 
 export async function saveMessage(input: {

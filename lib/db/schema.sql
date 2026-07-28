@@ -20,14 +20,24 @@ CREATE TABLE IF NOT EXISTS profiles (
 CREATE TABLE IF NOT EXISTS documents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   profile_id TEXT NOT NULL DEFAULT 'peter' REFERENCES profiles(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL DEFAULT 'cv',
+  kind TEXT NOT NULL DEFAULT 'cv'
+    CHECK (kind IN ('cv', 'project', 'note', 'other')),
   filename TEXT NOT NULL,
   mime_type TEXT,
+  description TEXT,
   content_text TEXT NOT NULL,
   chunk_count INTEGER NOT NULL DEFAULT 0,
+  vector_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Safe upgrades when documents already exists without newer columns
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS vector_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+CREATE INDEX IF NOT EXISTS documents_profile_created_idx
+  ON documents (profile_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

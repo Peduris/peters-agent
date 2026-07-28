@@ -8,6 +8,8 @@ export type RagChunk = {
   visibility: "public" | "private";
   source?: string;
   kind?: string;
+  documentId?: string;
+  description?: string;
 };
 
 function getIndex() {
@@ -58,11 +60,33 @@ export async function upsertChunks(
         source: chunk.source ?? "unknown",
         kind: chunk.kind ?? "document",
         text: chunk.text,
+        ...(chunk.documentId ? { documentId: chunk.documentId } : {}),
+        ...(chunk.description ? { description: chunk.description } : {}),
       },
     })),
   );
 
   return { upserted: chunks.length };
+}
+
+export async function deleteVectors(
+  ids: string[],
+): Promise<{ deleted: number; error?: string }> {
+  const index = getIndex();
+  if (!index) {
+    return { deleted: 0, error: "Upstash Vector is not configured." };
+  }
+  if (ids.length === 0) return { deleted: 0 };
+
+  // Upstash accepts batches; chunk to stay under request limits.
+  const batchSize = 100;
+  let deleted = 0;
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const batch = ids.slice(i, i + batchSize);
+    await index.delete(batch);
+    deleted += batch.length;
+  }
+  return { deleted };
 }
 
 export async function queryRag(input: {

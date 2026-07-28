@@ -3,12 +3,14 @@ import { z } from "zod";
 import { getLanguageModel } from "@/lib/ai/client";
 import { saveDocument, updateProfile, getProfile } from "@/lib/db/queries";
 import { extractPdfText } from "@/lib/pdf/extract";
-import { chunkText, upsertChunks } from "@/lib/rag/vector";
+import { chunkText, upsertChunks, type RagChunk } from "@/lib/rag/vector";
 import { hasAnthropic, hasOpenAI, hasUpstash, hasNeon } from "@/lib/env";
 
 /** PDF.js / unpdf need Node APIs — not Edge. */
 export const runtime = "nodejs";
 export const maxDuration = 60;
+
+const KINDS = new Set(["cv", "project", "note", "other"]);
 
 async function extractTextFromFile(file: File): Promise<string> {
   const name = file.name.toLowerCase();
@@ -46,6 +48,12 @@ export async function POST(req: Request) {
       return Response.json({ error: "Missing file" }, { status: 400 });
     }
 
+    const rawKind = String(form.get("kind") ?? "other").toLowerCase();
+    const kind = KINDS.has(rawKind) ? rawKind : "other";
+    const description = String(form.get("description") ?? "").trim();
+    const runOnboarding =
+      kind === "cv" && String(form.get("onboarding") ?? "true") !== "false";
+
     const contentText = (await extractTextFromFile(file)).trim();
     if (contentText.length < 40) {
       return Response.json(
@@ -54,17 +62,32 @@ export async function POST(req: Request) {
       );
     }
 
+    const documentId = crypto.randomUUID();
     const chunks = chunkText(contentText);
-    const stamp = Date.now();
-    const ragChunks = chunks.map((text, i) => ({
-      id: `cv-${stamp}-${i}`,
+    const ragChunks: RagChunk[] = chunks.map((text, i) => ({
+      id: `doc-${documentId}-${i}`,
       text,
       visibility: "private" as const,
       source: file.name,
-      kind: "cv",
+      kind,
+      documentId,
+      description: description || undefined,
     }));
 
-    // Also upsert a smaller public-safe summary chunk later after model rewrite
+    if (description) {
+      ragChunks.unshift({
+        id: `doc-${documentId}-desc`,
+        text: `Upload description (${file.name}): ${description}`,
+        visibility: "private",
+        source: file.name,
+        kind,
+        documentId,
+        description,
+      });
+    }
+
+    const vectorIds = ragChunks.map((c) => c.id);
+
     let upserted = 0;
     let ragError: string | undefined;
     if (hasUpstash() && hasOpenAI()) {
@@ -78,23 +101,78 @@ export async function POST(req: Request) {
       ragError = `Skipping vector upsert — missing ${need.join(" and ")}.`;
     }
 
-    let documentId: string | null = null;
+    let savedId: string | null = null;
     if (hasNeon()) {
       const saved = await saveDocument({
+        id: documentId,
         filename: file.name,
         mimeType: file.type,
         contentText,
         chunkCount: chunks.length,
-        kind: "cv",
+        kind,
+        description: description || null,
+        vectorIds,
+        metadata: {
+          ingestAt: new Date().toISOString(),
+          hasDescription: Boolean(description),
+        },
       });
-      if ("id" in saved) documentId = saved.id;
+      if ("id" in saved) savedId = saved.id;
+      else {
+        return Response.json({ error: saved.error }, { status: 503 });
+      }
     }
 
     let questions: string[] = [];
     let publicBio: string | undefined;
     let structured: Record<string, unknown> | undefined;
 
-    if (hasAnthropic()) {
+    // Non-onboarding CV uploads still enrich structured profile when Anthropic is available.
+    if (!runOnboarding && kind === "cv" && hasAnthropic()) {
+      try {
+        const { output } = await generateText({
+          model: getLanguageModel(),
+          output: Output.object({
+            schema: z.object({
+              structured: z.object({
+                skills: z.array(z.string()).default([]),
+                roles: z.array(z.string()).default([]),
+                industries: z.array(z.string()).default([]),
+                locations: z.array(z.string()).default([]),
+                languages: z.array(z.string()).default([]),
+                highlights: z.array(z.string()).default([]),
+              }),
+              publicBio: z.string().optional(),
+            }),
+          }),
+          prompt: `Parse this CV into structured profile fields for Peter.
+Return skills, roles, industries, locations, languages, highlights.
+Optionally improve a visitor-safe publicBio (2-4 sentences, no private contacts).
+
+${description ? `Uploader note: ${description}\n` : ""}
+CV:
+"""
+${contentText.slice(0, 24000)}
+"""`,
+        });
+        if (output) {
+          const existing = await getProfile();
+          await updateProfile({
+            structured: {
+              ...(existing?.structured ?? {}),
+              ...output.structured,
+              lastCvFilename: file.name,
+              lastCvIngestedAt: new Date().toISOString(),
+            },
+            public_bio: output.publicBio,
+          });
+        }
+      } catch {
+        // Profile enrichment is best-effort for library uploads
+      }
+    }
+
+    if (runOnboarding && hasAnthropic()) {
       const { output } = await generateText({
         model: getLanguageModel(),
         output: Output.object({
@@ -117,6 +195,7 @@ Parse this CV text and return:
 - a visitor-safe publicBio (2-4 sentences, no private contacts/salary)
 - exactly 5 high-leverage follow-up questions for Peter to refine the agent memory
 
+${description ? `Uploader note: ${description}\n` : ""}
 CV:
 """
 ${contentText.slice(0, 24000)}
@@ -128,7 +207,7 @@ ${contentText.slice(0, 24000)}
         publicBio = output.publicBio;
         questions = output.questions;
       }
-    } else {
+    } else if (runOnboarding) {
       questions = [
         "What roles are you targeting in the next 6–12 months?",
         "Which skills do you want to emphasize publicly vs keep private?",
@@ -138,46 +217,51 @@ ${contentText.slice(0, 24000)}
       ];
     }
 
-    const existing = await getProfile();
-    const mergedStructured = {
-      ...(existing?.structured ?? {}),
-      ...(structured ?? {}),
-      lastCvFilename: file.name,
-      lastCvIngestedAt: new Date().toISOString(),
-    };
+    if (runOnboarding) {
+      const existing = await getProfile();
+      const mergedStructured = {
+        ...(existing?.structured ?? {}),
+        ...(structured ?? {}),
+        lastCvFilename: file.name,
+        lastCvIngestedAt: new Date().toISOString(),
+      };
 
-    await updateProfile({
-      structured: mergedStructured,
-      public_bio: publicBio,
-      onboarding_state: "questions_asked",
-      onboarding_questions: questions,
-      onboarding_answers: [],
-    });
+      await updateProfile({
+        structured: mergedStructured,
+        public_bio: publicBio,
+        onboarding_state: "questions_asked",
+        onboarding_questions: questions,
+        onboarding_answers: [],
+      });
 
-    // Public bio into public RAG slice
-    if (publicBio && hasUpstash() && hasOpenAI()) {
-      await upsertChunks([
-        {
-          id: `public-bio-${stamp}`,
-          text: publicBio,
-          visibility: "public",
-          source: "public-bio",
-          kind: "bio",
-        },
-      ]);
+      if (publicBio && hasUpstash() && hasOpenAI()) {
+        await upsertChunks([
+          {
+            id: `public-bio-${documentId}`,
+            text: publicBio,
+            visibility: "public",
+            source: "public-bio",
+            kind: "bio",
+            documentId,
+          },
+        ]);
+      }
     }
 
     return Response.json({
       ok: true,
-      documentId,
+      documentId: savedId ?? documentId,
+      kind,
+      description: description || null,
       chunkCount: chunks.length,
+      vectorCount: vectorIds.length,
       upserted,
       ragError,
-      questions,
-      publicBio,
-      onboardingState: "questions_asked",
+      questions: runOnboarding ? questions : undefined,
+      publicBio: runOnboarding ? publicBio : undefined,
+      onboardingState: runOnboarding ? "questions_asked" : undefined,
       warnings: [
-        !hasNeon() ? "DATABASE_URL missing — profile not persisted to Neon." : null,
+        !hasNeon() ? "DATABASE_URL missing — document not persisted to Neon." : null,
         ragError ?? null,
       ].filter(Boolean),
     });
