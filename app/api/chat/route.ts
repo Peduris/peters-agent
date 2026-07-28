@@ -11,15 +11,19 @@ import { isAgentId, type AgentId } from "@/lib/ai/agent-meta";
 import { buildSystemPrompt } from "@/lib/ai/prompts";
 import { runInternetResearch, storeResearchInRag } from "@/lib/ai/research";
 import {
+  ADMIN_CEO_SESSION_ID,
   escalateToAdmin,
   formatOpenQueueForCeo,
+  isDismissIntent,
   resolveAndDeliver,
 } from "@/lib/ai/orchestrator";
 import {
   createPendingQuestion,
   ensureVisitorSession,
+  findAwaitingAdminEscalation,
   getProfile,
   listPendingQuestions,
+  resolvePendingQuestion,
   saveMessage,
   updateProfile,
 } from "@/lib/db/queries";
@@ -86,14 +90,67 @@ export async function POST(req: Request) {
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   const userText = lastUser ? extractText(lastUser) : "";
 
+  const adminSessionId =
+    surface === "admin" && agentId === "ceo" ? ADMIN_CEO_SESSION_ID : null;
+
   if (userText) {
     await saveMessage({
       surface,
       agentId,
       role: "user",
       content: userText,
-      sessionId: surface === "visitor" ? visitorSessionId : null,
+      sessionId:
+        surface === "visitor" ? visitorSessionId : adminSessionId,
     });
+  }
+
+  // Primary path: Peter answers a visitor escalation directly in the CEO chat.
+  if (surface === "admin" && agentId === "ceo" && userText) {
+    const awaiting = await findAwaitingAdminEscalation(ADMIN_CEO_SESSION_ID);
+    if (awaiting) {
+      let confirmText: string;
+      if (isDismissIntent(userText)) {
+        await resolvePendingQuestion(awaiting.pendingId, "dismissed");
+        confirmText = `Dismissed that visitor question (“${awaiting.question.slice(0, 120)}”).`;
+        await saveMessage({
+          surface: "admin",
+          agentId: "ceo",
+          role: "assistant",
+          content: confirmText,
+          sessionId: ADMIN_CEO_SESSION_ID,
+          metadata: {
+            kind: "visitor-escalation-dismissed",
+            pendingId: awaiting.pendingId,
+          },
+        });
+      } else {
+        const delivered = await resolveAndDeliver({
+          pendingId: awaiting.pendingId,
+          answer: userText,
+        });
+        // resolveAndDeliver already wrote the durable confirm into the admin thread.
+        confirmText = delivered.ok
+          ? `Got it — stored and sent to the visitor.\n\nPublic reply:\n${delivered.publicReply}`
+          : `I couldn’t deliver that reply (${delivered.error ?? "unknown error"}). Try again or use the secondary inbox.`;
+        if (!delivered.ok) {
+          await saveMessage({
+            surface: "admin",
+            agentId: "ceo",
+            role: "assistant",
+            content: confirmText,
+            sessionId: ADMIN_CEO_SESSION_ID,
+          });
+        }
+      }
+
+      const model = getLanguageModel();
+      const result = streamText({
+        model,
+        system: `Reply with exactly the following text and nothing else:\n\n${confirmText}`,
+        messages: [{ role: "user", content: "ok" }],
+      });
+      return result.toUIMessageStreamResponse();
+    }
   }
 
   const profile = await getProfile();
@@ -287,6 +344,7 @@ export async function POST(req: Request) {
             agentId,
             role: "assistant",
             content: text,
+            sessionId: ADMIN_CEO_SESSION_ID,
           });
         }
       },

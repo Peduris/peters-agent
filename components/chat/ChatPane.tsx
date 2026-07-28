@@ -11,6 +11,18 @@ function messageText(message: UIMessage): string {
     .join("\n");
 }
 
+function toUiMessage(input: {
+  id: string;
+  role: string;
+  content: string;
+}): UIMessage {
+  return {
+    id: input.id,
+    role: input.role === "user" ? "user" : "assistant",
+    parts: [{ type: "text", text: input.content }],
+  };
+}
+
 type Props = {
   surface: "admin" | "visitor";
   agentId: string;
@@ -18,7 +30,9 @@ type Props = {
   emptyHint?: string;
   resetKey?: string;
   visitorSessionId?: string | null;
-  /** When true, poll for orchestrator-delivered replies into this thread. */
+  /** Persist/poll this message session (e.g. admin-ceo or visitor uuid). */
+  historySessionId?: string | null;
+  /** When true, poll for orchestrator-delivered replies into this visitor thread. */
   pollDeliveries?: boolean;
 };
 
@@ -29,11 +43,14 @@ export function ChatPane({
   emptyHint,
   resetKey,
   visitorSessionId,
+  historySessionId,
   pollDeliveries = false,
 }: Props) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const deliveredIds = useRef<Set<string>>(new Set());
+  const seenHistoryIds = useRef<Set<string>>(new Set());
+  const lastCreatedAt = useRef<string | null>(null);
 
   const transport = useMemo(
     () =>
@@ -50,7 +67,7 @@ export function ChatPane({
 
   const { messages, sendMessage, status, setMessages, error, clearError } =
     useChat({
-      id: `${surface}-${agentId}-${resetKey ?? visitorSessionId ?? "default"}`,
+      id: `${surface}-${agentId}-${resetKey ?? visitorSessionId ?? historySessionId ?? "default"}`,
       transport,
     });
 
@@ -58,12 +75,66 @@ export function ChatPane({
     setMessages([]);
     clearError?.();
     deliveredIds.current = new Set();
+    seenHistoryIds.current = new Set();
+    lastCreatedAt.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentId, resetKey, visitorSessionId]);
+  }, [agentId, resetKey, visitorSessionId, historySessionId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, status]);
+
+  // Load + poll persisted thread (admin CEO escalations, visitor history)
+  useEffect(() => {
+    if (!historySessionId) return;
+    let cancelled = false;
+
+    async function pullHistory(initial: boolean) {
+      try {
+        const qs = new URLSearchParams({ sessionId: historySessionId! });
+        if (!initial && lastCreatedAt.current) {
+          qs.set("after", lastCreatedAt.current);
+        }
+        const res = await fetch(`/api/messages?${qs.toString()}`);
+        const data = await res.json();
+        const rows = (data.messages ?? []) as Array<{
+          id: string;
+          role: string;
+          content: string;
+          createdAt: string;
+        }>;
+        if (cancelled || rows.length === 0) return;
+
+        const fresh = rows.filter((r) => !seenHistoryIds.current.has(r.id));
+        if (fresh.length === 0) return;
+        for (const r of fresh) {
+          seenHistoryIds.current.add(r.id);
+          lastCreatedAt.current = r.createdAt;
+        }
+
+        if (initial) {
+          setMessages(fresh.map(toUiMessage));
+        } else {
+          setMessages((prev) => {
+            const existing = new Set(prev.map((m) => m.id));
+            const toAdd = fresh
+              .filter((r) => !existing.has(r.id))
+              .map(toUiMessage);
+            return toAdd.length ? [...prev, ...toAdd] : prev;
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    void pullHistory(true);
+    const timer = window.setInterval(() => void pullHistory(false), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [historySessionId, setMessages]);
 
   useEffect(() => {
     if (!pollDeliveries || !visitorSessionId) return;

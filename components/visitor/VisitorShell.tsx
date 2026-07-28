@@ -6,7 +6,9 @@ import { ChatPane } from "@/components/chat/ChatPane";
 import { SurfaceSwitcher } from "@/components/SurfaceSwitcher";
 import { DEFAULT_PUBLIC_BIO, visitorGreeting } from "@/lib/ai/copy";
 
-const SESSION_KEY = "peters-agent-visitor-session";
+import { VISITOR_SESSION_STORAGE_KEY } from "@/lib/ai/session-ids";
+
+const SESSION_KEY = VISITOR_SESSION_STORAGE_KEY;
 
 function getOrCreateSessionId(): string {
   if (typeof window === "undefined") return "";

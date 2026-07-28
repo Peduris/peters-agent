@@ -402,6 +402,84 @@ export async function listSessionMessages(
   }
 }
 
+/** If the latest CEO assistant message is an open visitor escalation, return it. */
+export async function findAwaitingAdminEscalation(
+  adminSessionId = "admin-ceo",
+): Promise<{
+  messageId: string;
+  pendingId: string;
+  visitorSessionId: string | null;
+  question: string;
+} | null> {
+  const sql = getSql();
+  if (!sql) return null;
+  try {
+    const rows = await sql`
+      SELECT id, content, metadata, created_at
+      FROM messages
+      WHERE surface = 'admin'
+        AND agent_id = 'ceo'
+        AND session_id = ${adminSessionId}
+        AND role = 'assistant'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+    const row = rows[0] as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const meta = (row.metadata as Record<string, unknown>) ?? {};
+    if (meta.kind !== "visitor-escalation") return null;
+    const pendingId = typeof meta.pendingId === "string" ? meta.pendingId : null;
+    if (!pendingId) return null;
+    const pending = await getPendingQuestion(pendingId);
+    if (!pending || pending.status !== "open") return null;
+    return {
+      messageId: String(row.id),
+      pendingId,
+      visitorSessionId: pending.visitor_session_id,
+      question: pending.question,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function listMessagesAfter(input: {
+  sessionId: string;
+  afterCreatedAt?: string | null;
+  limit?: number;
+}): Promise<StoredMessage[]> {
+  const sql = getSql();
+  if (!sql) return [];
+  try {
+    const rows = input.afterCreatedAt
+      ? await sql`
+          SELECT * FROM messages
+          WHERE session_id = ${input.sessionId}
+            AND created_at > ${input.afterCreatedAt}::timestamptz
+          ORDER BY created_at ASC
+          LIMIT ${input.limit ?? 50}
+        `
+      : await sql`
+          SELECT * FROM messages
+          WHERE session_id = ${input.sessionId}
+          ORDER BY created_at ASC
+          LIMIT ${input.limit ?? 200}
+        `;
+    return rows.map((row) => ({
+      id: String(row.id),
+      surface: String(row.surface),
+      agent_id: String(row.agent_id),
+      role: String(row.role),
+      content: String(row.content),
+      session_id: (row.session_id as string) ?? null,
+      metadata: (row.metadata as Record<string, unknown>) ?? {},
+      created_at: String(row.created_at),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export async function saveMessage(input: {
   surface: "admin" | "visitor";
   agentId: string;

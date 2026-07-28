@@ -24,6 +24,7 @@
 
 html,
 body {
+  height: 100%;
   min-height: 100%;
 }
 
@@ -156,9 +157,13 @@ a {
 /* Visitor */
 .visitor-shell,
 .admin-shell {
-  min-height: 100vh;
+  height: 100dvh;
+  max-height: 100dvh;
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(260px, 340px) 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .visitor-sidebar,
@@ -170,6 +175,7 @@ a {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -215,10 +221,13 @@ a {
 
 .visitor-main,
 .admin-main {
-  min-height: 100vh;
+  min-height: 0;
+  height: 100%;
+  max-height: 100%;
   display: flex;
   flex-direction: column;
   padding: 1.25rem 1.25rem 1.25rem 0;
+  overflow: hidden;
 }
 
 .visitor-main {
@@ -322,6 +331,7 @@ a {
 /* Knowledge / Profile */
 .knowledge-panel {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
@@ -569,7 +579,9 @@ a {
 .qa textarea,
 .chat-form textarea {
   width: 100%;
-  resize: vertical;
+  min-width: 0;
+  resize: none;
+  max-height: 8rem;
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 0.7rem 0.8rem;
@@ -588,6 +600,12 @@ button,
   font: inherit;
   font-weight: 650;
   cursor: pointer;
+}
+
+.chat-form button {
+  flex-shrink: 0;
+  align-self: end;
+  white-space: nowrap;
 }
 
 button:disabled,
@@ -624,12 +642,78 @@ button.ghost {
   letter-spacing: 0.08em;
 }
 
-.pending-actions {
-  flex-direction: row;
-  flex-wrap: wrap;
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.session-item {
+  width: 100%;
+  text-align: left;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--ink);
+  padding: 0.55rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.session-item.active {
+  border-color: var(--sea);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.session-item-id {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.session-item-preview {
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.session-thread {
+  margin-top: 0.75rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--line);
+}
+
+.session-msgs {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-size: 0.82rem;
+}
+
+.session-new {
+  margin-top: 0.75rem;
+  width: 100%;
+}
+
+.session-id {
+  margin: 0.4rem 0 0;
+  font-size: 0.75rem;
+}
+
+.panel-hint {
+  margin: 0 0 0.65rem;
+  font-size: 0.82rem;
 }
 
 .main-header {
+  flex-shrink: 0;
   display: flex;
   justify-content: space-between;
   align-items: end;
@@ -659,11 +743,11 @@ button.ghost {
 
 .visitor-main .chat-pane {
   margin: 0;
-  min-height: calc(100vh - 3rem);
 }
 
 .chat-scroll {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   padding: 1.25rem;
   display: flex;
@@ -725,12 +809,19 @@ button.ghost {
 }
 
 .chat-form {
+  flex-shrink: 0;
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
   gap: 0.65rem;
   padding: 0.9rem;
+  padding-bottom: max(0.9rem, env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
 }
 
 @keyframes rise {
@@ -757,24 +848,29 @@ button.ghost {
   .visitor-shell,
   .admin-shell {
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100dvh;
+    max-height: 100dvh;
   }
 
   .visitor-sidebar,
   .admin-sidebar {
     border-right: none;
     border-bottom: 1px solid var(--line);
-    max-height: none;
+    max-height: 42vh;
+    min-height: 0;
   }
 
   .visitor-main,
   .admin-main {
     padding: 0 0 1rem;
+    min-height: 0;
   }
 
   .chat-pane,
   .visitor-main .chat-pane {
     margin: 0 0.75rem;
-    min-height: 60vh;
+    min-height: 0;
     border-radius: 18px;
   }
 

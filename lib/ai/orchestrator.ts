@@ -13,6 +13,9 @@ import {
 } from "@/lib/db/queries";
 import { upsertChunks } from "@/lib/rag/vector";
 import { hasAnthropic, hasOpenAI, hasUpstash } from "@/lib/env";
+import { ADMIN_CEO_SESSION_ID } from "@/lib/ai/session-ids";
+
+export { ADMIN_CEO_SESSION_ID } from "@/lib/ai/session-ids";
 
 function isTrivialVisitorMessage(text: string): boolean {
   const t = text.trim().toLowerCase();
@@ -22,13 +25,28 @@ function isTrivialVisitorMessage(text: string): boolean {
   );
 }
 
-/** Escalate an unknown visitor question into the CEO/Peter admin queue. */
+function ceoEscalationPrompt(input: {
+  question: string;
+  pendingId: string;
+  visitorSessionId: string;
+}): string {
+  const shortSession = input.visitorSessionId.slice(0, 8);
+  return `A visitor asked (session ${shortSession}…):\n\n"${input.question}"\n\nWhat should I tell them? Reply here in chat and I’ll store it and send a public-facing reply back to that visitor.`;
+}
+
+/** Escalate an unknown visitor question into the CEO/Peter admin chat thread. */
 export async function escalateToAdmin(input: {
   question: string;
   visitorSessionId: string;
   ragBestScore?: number;
   reason?: string;
-}): Promise<{ ok: boolean; pendingId?: string; duplicate?: boolean; skipped?: string }> {
+}): Promise<{
+  ok: boolean;
+  pendingId?: string;
+  duplicate?: boolean;
+  skipped?: string;
+  adminMessagePosted?: boolean;
+}> {
   const question = input.question.trim();
   if (!question) return { ok: false, skipped: "empty" };
   if (isTrivialVisitorMessage(question)) {
@@ -42,7 +60,30 @@ export async function escalateToAdmin(input: {
   });
   if (dup) {
     await touchVisitorSession(input.visitorSessionId, {});
-    return { ok: true, pendingId: dup.id, duplicate: true };
+    // Nudge again in admin chat if still open
+    await saveMessage({
+      surface: "admin",
+      agentId: "ceo",
+      role: "assistant",
+      content: ceoEscalationPrompt({
+        question: dup.question,
+        pendingId: dup.id,
+        visitorSessionId: input.visitorSessionId,
+      }),
+      sessionId: ADMIN_CEO_SESSION_ID,
+      metadata: {
+        kind: "visitor-escalation",
+        pendingId: dup.id,
+        visitorSessionId: input.visitorSessionId,
+        duplicate: true,
+      },
+    });
+    return {
+      ok: true,
+      pendingId: dup.id,
+      duplicate: true,
+      adminMessagePosted: true,
+    };
   }
 
   const scoreNote =
@@ -68,7 +109,28 @@ export async function escalateToAdmin(input: {
     preview: `Escalated: ${question.slice(0, 120)}`,
   });
 
-  return { ok: true, pendingId: created.id };
+  await saveMessage({
+    surface: "admin",
+    agentId: "ceo",
+    role: "assistant",
+    content: ceoEscalationPrompt({
+      question,
+      pendingId: created.id,
+      visitorSessionId: input.visitorSessionId,
+    }),
+    sessionId: ADMIN_CEO_SESSION_ID,
+    metadata: {
+      kind: "visitor-escalation",
+      pendingId: created.id,
+      visitorSessionId: input.visitorSessionId,
+    },
+  });
+
+  return {
+    ok: true,
+    pendingId: created.id,
+    adminMessagePosted: true,
+  };
 }
 
 async function formulatePublicReply(input: {
@@ -114,6 +176,7 @@ export async function resolveAndDeliver(input: {
   publicReply?: string;
   visitorSessionId?: string | null;
   ragUpserted?: number;
+  question?: string;
 }> {
   const answer = input.answer.trim();
   if (!answer) return { ok: false, error: "Answer is required" };
@@ -125,6 +188,7 @@ export async function resolveAndDeliver(input: {
       ok: true,
       publicReply: pending.public_reply ?? undefined,
       visitorSessionId: pending.visitor_session_id,
+      question: pending.question,
     };
   }
 
@@ -177,11 +241,26 @@ export async function resolveAndDeliver(input: {
     });
   }
 
+  // Confirm in admin CEO thread
+  await saveMessage({
+    surface: "admin",
+    agentId: "ceo",
+    role: "assistant",
+    content: `Delivered to the visitor${sessionId ? ` (${sessionId.slice(0, 8)}…)` : ""}.\n\nPublic reply:\n${publicReply}${ragUpserted ? `\n\n(Also stored in public RAG for next time.)` : ""}`,
+    sessionId: ADMIN_CEO_SESSION_ID,
+    metadata: {
+      kind: "visitor-delivery-confirm",
+      pendingId: pending.id,
+      visitorSessionId: sessionId,
+    },
+  });
+
   return {
     ok: true,
     publicReply,
     visitorSessionId: sessionId,
     ragUpserted,
+    question: pending.question,
   };
 }
 
@@ -197,4 +276,9 @@ export async function formatOpenQueueForCeo(): Promise<string> {
       return `${i + 1}. [${p.id.slice(0, 8)}] (${p.source}${sid}) ${p.question}`;
     })
     .join("\n");
+}
+
+export function isDismissIntent(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  return /^(dismiss|skip|ignore|don'?t answer|no need)(\s|$)/i.test(t);
 }

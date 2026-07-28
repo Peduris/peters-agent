@@ -6,6 +6,7 @@ import { AGENTS } from "@/lib/ai/agent-meta";
 import { ChatPane } from "@/components/chat/ChatPane";
 import { SurfaceSwitcher } from "@/components/SurfaceSwitcher";
 import { KnowledgePanel } from "@/components/admin/KnowledgePanel";
+import { ADMIN_CEO_SESSION_ID } from "@/lib/ai/session-ids";
 
 type ProfileResponse = {
   profile: {
@@ -26,7 +27,18 @@ type PendingItem = {
   question: string;
   context: string | null;
   status: string;
+  visitor_session_id?: string | null;
   created_at: string;
+};
+
+type VisitorSessionItem = {
+  id: string;
+  label: string | null;
+  preview: string | null;
+  message_count: number;
+  open_pending_count: number;
+  last_message_at: string | null;
+  updated_at: string;
 };
 
 type AdminView = "chat" | "knowledge";
@@ -39,6 +51,11 @@ export function AdminShell() {
   const [profile, setProfile] = useState<ProfileResponse["profile"] | null>(null);
   const [missing, setMissing] = useState<string[]>([]);
   const [pending, setPending] = useState<PendingItem[]>([]);
+  const [sessions, setSessions] = useState<VisitorSessionItem[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [sessionMessages, setSessionMessages] = useState<
+    Array<{ id: string; role: string; content: string; created_at: string }>
+  >([]);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
   const [answers, setAnswers] = useState<string[]>(["", "", "", "", ""]);
@@ -46,28 +63,49 @@ export function AdminShell() {
   const [onboardingSummary, setOnboardingSummary] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    const [profileRes, pendingRes] = await Promise.all([
+    const [profileRes, pendingRes, sessionsRes] = await Promise.all([
       fetch("/api/profile").then((r) => r.json() as Promise<ProfileResponse>),
       fetch("/api/pending?status=open").then(
         (r) => r.json() as Promise<{ items: PendingItem[] }>,
+      ),
+      fetch("/api/sessions").then(
+        (r) => r.json() as Promise<{ sessions: VisitorSessionItem[] }>,
       ),
     ]);
     setProfile(profileRes.profile);
     setMissing(profileRes.missing ?? []);
     setPending(pendingRes.items ?? []);
+    setSessions(sessionsRes.sessions ?? []);
   }, []);
 
   useEffect(() => {
-    // Defer initial fetch so setState is not synchronous inside the effect body.
     const timeout = window.setTimeout(() => {
       void refresh();
     }, 0);
-    const id = window.setInterval(() => void refresh(), 15000);
+    const id = window.setInterval(() => void refresh(), 10000);
     return () => {
       window.clearTimeout(timeout);
       window.clearInterval(id);
     };
   }, [refresh]);
+
+  async function openSession(id: string) {
+    setSelectedSessionId(id);
+    const res = await fetch(
+      `/api/sessions?id=${encodeURIComponent(id)}&messages=1`,
+    );
+    const data = await res.json();
+    setSessionMessages(
+      (data.messages ?? []).map(
+        (m: {
+          id: string;
+          role: string;
+          content: string;
+          created_at: string;
+        }) => m,
+      ),
+    );
+  }
 
   async function onUpload(file: File | null) {
     if (!file) return;
@@ -120,11 +158,11 @@ export function AdminShell() {
     }
   }
 
-  async function resolvePending(id: string, status: "answered" | "dismissed") {
+  async function dismissPending(id: string) {
     await fetch("/api/pending", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, status }),
+      body: JSON.stringify({ id, status: "dismissed" }),
     });
     await refresh();
   }
@@ -179,6 +217,61 @@ export function AdminShell() {
             </nav>
 
             <section className="panel">
+              <h2>Visitor sessions ({sessions.length})</h2>
+              <p className="muted panel-hint">
+                Each public visitor has their own thread. Escalations land in CEO
+                chat.
+              </p>
+              {sessions.length === 0 ? (
+                <p className="muted">No visitor sessions yet.</p>
+              ) : (
+                <ul className="session-list">
+                  {sessions.map((s) => (
+                    <li key={s.id}>
+                      <button
+                        type="button"
+                        className={
+                          selectedSessionId === s.id
+                            ? "session-item active"
+                            : "session-item"
+                        }
+                        onClick={() => void openSession(s.id)}
+                      >
+                        <span className="session-item-id">
+                          {s.id.slice(0, 8)}…
+                          {s.open_pending_count > 0
+                            ? ` · ${s.open_pending_count} open`
+                            : ""}
+                        </span>
+                        <span className="session-item-preview">
+                          {s.preview || `${s.message_count} messages`}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {selectedSessionId ? (
+                <div className="session-thread">
+                  <p className="pending-meta">Thread {selectedSessionId.slice(0, 8)}…</p>
+                  {sessionMessages.length === 0 ? (
+                    <p className="muted">No messages yet.</p>
+                  ) : (
+                    <ul className="session-msgs">
+                      {sessionMessages.slice(-12).map((m) => (
+                        <li key={m.id}>
+                          <strong>{m.role === "user" ? "Visitor" : "Agent"}:</strong>{" "}
+                          {m.content.slice(0, 180)}
+                          {m.content.length > 180 ? "…" : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : null}
+            </section>
+
+            <section className="panel">
               <h2>CV upload</h2>
               <p className="muted panel-hint">
                 Seeds onboarding. Manage all files in Profile / Knowledge.
@@ -227,7 +320,11 @@ export function AdminShell() {
             ) : null}
 
             <section className="panel">
-              <h2>Pending questions ({pending.length})</h2>
+              <h2>Secondary inbox ({pending.length})</h2>
+              <p className="muted panel-hint">
+                Primary path: answer in the CEO chat when it asks “What should I
+                tell them?”
+              </p>
               {pending.length === 0 ? (
                 <p className="muted">Inbox clear.</p>
               ) : (
@@ -235,18 +332,26 @@ export function AdminShell() {
                   {pending.map((item) => (
                     <li key={item.id}>
                       <p className="pending-q">{item.question}</p>
-                      <p className="pending-meta">{item.source}</p>
+                      <p className="pending-meta">
+                        {item.source}
+                        {item.visitor_session_id
+                          ? ` · ${item.visitor_session_id.slice(0, 8)}…`
+                          : ""}
+                      </p>
                       <div className="pending-actions">
                         <button
                           type="button"
-                          onClick={() => void resolvePending(item.id, "answered")}
+                          className="ghost"
+                          onClick={() => {
+                            setAgentId("ceo");
+                          }}
                         >
-                          Mark answered
+                          Open CEO chat
                         </button>
                         <button
                           type="button"
                           className="ghost"
-                          onClick={() => void resolvePending(item.id, "dismissed")}
+                          onClick={() => void dismissPending(item.id)}
                         >
                           Dismiss
                         </button>
@@ -300,8 +405,20 @@ export function AdminShell() {
           <ChatPane
             surface="admin"
             agentId={agentId}
-            placeholder="Ask the CEO or switch agents…"
-            emptyHint="Upload a CV to start onboarding, or talk with the CEO about your next moves."
+            historySessionId={
+              agentId === "ceo" ? ADMIN_CEO_SESSION_ID : null
+            }
+            resetKey={agentId}
+            placeholder={
+              agentId === "ceo"
+                ? "Answer visitor escalations here, or ask the CEO…"
+                : "Message this agent…"
+            }
+            emptyHint={
+              agentId === "ceo"
+                ? "Visitor unknowns appear here as CEO questions. Reply in chat to store knowledge and message that visitor."
+                : "Switch to CEO to handle visitor escalations."
+            }
           />
         ) : (
           <KnowledgePanel />
