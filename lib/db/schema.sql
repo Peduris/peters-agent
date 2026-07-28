@@ -154,3 +154,23 @@ INSERT INTO agents (id, label, enabled, description) VALUES
   ('public-face', 'Public Face', TRUE, 'Visitor-facing public answers'),
   ('public-orchestrator', 'Public orchestrator', TRUE, 'Routes visitor sessions ↔ CEO / Peter')
 ON CONFLICT (id) DO NOTHING;
+
+-- Estimated AI spend per UTC day + surface (public | admin | system)
+CREATE TABLE IF NOT EXISTS ai_spend_daily (
+  day DATE NOT NULL,
+  surface TEXT NOT NULL CHECK (surface IN ('public', 'admin', 'system')),
+  estimated_usd NUMERIC(14, 8) NOT NULL DEFAULT 0,
+  request_count INTEGER NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (day, surface)
+);
+
+CREATE INDEX IF NOT EXISTS ai_spend_daily_day_idx ON ai_spend_daily (day DESC);
+
+-- Sliding-window rate limit buckets (public IP / session)
+CREATE TABLE IF NOT EXISTS ai_rate_limit_buckets (
+  bucket_key TEXT PRIMARY KEY,
+  window_started_at TIMESTAMPTZ NOT NULL,
+  hit_count INTEGER NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

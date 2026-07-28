@@ -34,6 +34,18 @@ import {
   classifyVisitorInterest,
   shouldFlagInterest,
 } from "@/lib/ai/interest";
+import {
+  BudgetExceededError,
+  budgetExceededResponse,
+  chatReserveUsd,
+  guardPublicChat,
+  guardSpend,
+  releaseReservation,
+  settleChatSpend,
+  spendSurfaceFromChat,
+  tokensFromUsage,
+  type SpendSurface,
+} from "@/lib/budget";
 
 export const maxDuration = 120;
 
@@ -90,6 +102,26 @@ export async function POST(req: Request) {
     if (visitorSessionId) {
       await ensureVisitorSession(visitorSessionId);
     }
+  }
+
+  const spendSurface: SpendSurface = spendSurfaceFromChat(surface);
+  let reservedUsd = 0;
+
+  if (surface === "visitor") {
+    const gated = await guardPublicChat({
+      req,
+      sessionId: visitorSessionId,
+      reserveUsd: chatReserveUsd(),
+    });
+    if (!gated.ok) return gated.response;
+    reservedUsd = gated.reserved;
+  } else {
+    const gated = await guardSpend({
+      surface: "admin",
+      reserveUsd: chatReserveUsd(),
+    });
+    if (!gated.ok) return gated.response;
+    reservedUsd = gated.reserved;
   }
 
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
@@ -161,6 +193,15 @@ export async function POST(req: Request) {
         model,
         system: `Reply with exactly the following text and nothing else:\n\n${confirmText}`,
         messages: [{ role: "user", content: "ok" }],
+        onFinish: async ({ usage }) => {
+          const tokens = tokensFromUsage(usage);
+          await settleChatSpend({
+            surface: spendSurface,
+            reservedUsd,
+            inputTokens: tokens.inputTokens,
+            outputTokens: tokens.outputTokens,
+          });
+        },
       });
       return result.toUIMessageStreamResponse();
     }
@@ -168,9 +209,25 @@ export async function POST(req: Request) {
 
   const profile = await getProfile();
   const visibility = surface === "visitor" ? "public" : "any";
-  const rag = userText
-    ? await queryRag({ query: userText, topK: 6, visibility })
-    : { hits: [] as Array<{ text: string; score: number; visibility: string }> };
+  let rag: {
+    hits: Array<{ text: string; score: number; visibility: string }>;
+  };
+  try {
+    rag = userText
+      ? await queryRag({
+          query: userText,
+          topK: 6,
+          visibility,
+          spendSurface,
+        })
+      : { hits: [] };
+  } catch (error) {
+    await releaseReservation(spendSurface, reservedUsd);
+    if (error instanceof BudgetExceededError) {
+      return budgetExceededResponse(error.message);
+    }
+    throw error;
+  }
 
   const { context: ragContext, bestScore } = formatHitsForPrompt(
     rag.hits.map((h) => ({ text: h.text, score: h.score })),
@@ -228,6 +285,7 @@ export async function POST(req: Request) {
               kind: "ceo-delegation",
               persistRag: false,
               persistFollowUps: false,
+              spendSurface: "admin",
             });
             if (!research.ok) {
               return { ok: false, error: research.error };
@@ -350,7 +408,14 @@ export async function POST(req: Request) {
           },
         }),
       },
-      onFinish: async ({ text }) => {
+      onFinish: async ({ text, usage }) => {
+        const tokens = tokensFromUsage(usage);
+        await settleChatSpend({
+          surface: spendSurface,
+          reservedUsd,
+          inputTokens: tokens.inputTokens,
+          outputTokens: tokens.outputTokens,
+        });
         if (text) {
           await saveMessage({
             surface,
@@ -408,7 +473,14 @@ export async function POST(req: Request) {
           },
         }),
       },
-      onFinish: async ({ text }) => {
+      onFinish: async ({ text, usage }) => {
+        const tokens = tokensFromUsage(usage);
+        await settleChatSpend({
+          surface: spendSurface,
+          reservedUsd,
+          inputTokens: tokens.inputTokens,
+          outputTokens: tokens.outputTokens,
+        });
         if (text) {
           await saveMessage({
             surface,
@@ -428,7 +500,14 @@ export async function POST(req: Request) {
     model,
     system,
     messages: modelMessages,
-    onFinish: async ({ text }) => {
+    onFinish: async ({ text, usage }) => {
+      const tokens = tokensFromUsage(usage);
+      await settleChatSpend({
+        surface: spendSurface,
+        reservedUsd,
+        inputTokens: tokens.inputTokens,
+        outputTokens: tokens.outputTokens,
+      });
       if (text) {
         await saveMessage({
           surface,

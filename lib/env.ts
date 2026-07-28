@@ -17,6 +17,8 @@ export const env = {
   upstashVectorUrl: () => read("UPSTASH_VECTOR_REST_URL"),
   upstashVectorToken: () => read("UPSTASH_VECTOR_REST_TOKEN"),
   cronSecret: () => read("CRON_SECRET"),
+  /** Bearer / x-api-key for the public MCP server. */
+  mcpApiKey: () => read("MCP_API_KEY"),
 };
 
 export function hasAnthropic(): boolean {

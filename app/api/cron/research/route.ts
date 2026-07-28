@@ -19,6 +19,7 @@ async function runResearch() {
     kind: "daily-market-scan",
     persistRag: true,
     persistFollowUps: true,
+    spendSurface: "system",
   });
 
   if (!result.ok) {

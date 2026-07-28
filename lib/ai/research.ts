@@ -11,6 +11,15 @@ import {
 } from "@/lib/db/queries";
 import { upsertChunks } from "@/lib/rag/vector";
 import { hasAnthropic, hasOpenAI, hasUpstash } from "@/lib/env";
+import {
+  BudgetExceededError,
+  guardSpend,
+  releaseReservation,
+  researchReserveUsd,
+  settleChatSpend,
+  tokensFromUsage,
+  type SpendSurface,
+} from "@/lib/budget";
 
 export const researchOutputSchema = z.object({
   focus: z.string(),
@@ -60,6 +69,8 @@ export async function runInternetResearch(input: {
   persistRag?: boolean;
   /** Queue researcher follow-ups into pending_questions. Default false — CEO decides. */
   persistFollowUps?: boolean;
+  /** Attribution label for the shared daily budget pool. */
+  spendSurface?: SpendSurface;
 }): Promise<ResearchRunResult> {
   if (!hasAnthropic()) {
     return { ok: false, error: "ANTHROPIC_API_KEY missing", runId: null };
@@ -69,6 +80,25 @@ export async function runInternetResearch(input: {
   if (!brief) {
     return { ok: false, error: "Research brief is empty", runId: null };
   }
+
+  const spendSurface = input.spendSurface ?? "system";
+  const gated = await guardSpend({
+    surface: spendSurface,
+    reserveUsd: researchReserveUsd(),
+  });
+  if (!gated.ok) {
+    const msg =
+      gated.result.ok === false
+        ? gated.result.message
+        : "Daily AI budget exhausted.";
+    return {
+      ok: false,
+      error: msg,
+      runId: null,
+    };
+  }
+  const reservedUsd = gated.reserved;
+  let settled = false;
 
   const profile = await getProfile();
   const kind = input.kind ?? "on-demand-research";
@@ -81,7 +111,7 @@ export async function runInternetResearch(input: {
   });
 
   try {
-    const { output } = await generateText({
+    const { output, usage } = await generateText({
       model: getLanguageModel(),
       output: Output.object({ schema: researchOutputSchema }),
       system: `${skill}
@@ -99,6 +129,15 @@ ${JSON.stringify(profileSnapshot(profile), null, 2)}
 
 Return focus, findings, gaps, 1-3 follow-up questions for Peter, reportMarkdown, storeWorthySummary, and needsPeterInput.`,
     });
+
+    const tokens = tokensFromUsage(usage);
+    await settleChatSpend({
+      surface: spendSurface,
+      reservedUsd,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+    });
+    settled = true;
 
     if (!output) {
       throw new Error("No structured research output");
@@ -119,16 +158,19 @@ Return focus, findings, gaps, 1-3 follow-up questions for Peter, reportMarkdown,
     let ragUpserted = 0;
     const toStore = output.storeWorthySummary.trim() || output.reportMarkdown.trim();
     if (input.persistRag && toStore && hasUpstash() && hasOpenAI()) {
-      const result = await upsertChunks([
-        {
-          id: `research-${Date.now()}`,
-          text: toStore,
-          visibility: "private",
-          source: "internet-researcher",
-          kind: "research-report",
-          description: output.focus,
-        },
-      ]);
+      const result = await upsertChunks(
+        [
+          {
+            id: `research-${Date.now()}`,
+            text: toStore,
+            visibility: "private",
+            source: "internet-researcher",
+            kind: "research-report",
+            description: output.focus,
+          },
+        ],
+        { surface: spendSurface },
+      );
       ragUpserted = result.upserted;
     }
 
@@ -157,7 +199,15 @@ Return focus, findings, gaps, 1-3 follow-up questions for Peter, reportMarkdown,
       pendingQueued,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Research failed";
+    if (!settled) {
+      await releaseReservation(spendSurface, reservedUsd);
+    }
+    const message =
+      error instanceof BudgetExceededError
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : "Research failed";
     if (runId) {
       await updateAgentRun(runId, {
         status: "failed",
@@ -184,16 +234,19 @@ export async function storeResearchInRag(input: {
     };
   }
 
-  const result = await upsertChunks([
-    {
-      id: `research-${Date.now()}`,
-      text,
-      visibility: "private",
-      source: "internet-researcher",
-      kind: "research-report",
-      description: input.focus,
-    },
-  ]);
+  const result = await upsertChunks(
+    [
+      {
+        id: `research-${Date.now()}`,
+        text,
+        visibility: "private",
+        source: "internet-researcher",
+        kind: "research-report",
+        description: input.focus,
+      },
+    ],
+    { surface: "admin" },
+  );
 
   if (result.error) {
     return { ok: false, upserted: 0, error: result.error };

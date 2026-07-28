@@ -5,6 +5,15 @@ import { saveDocument, updateProfile, getProfile } from "@/lib/db/queries";
 import { extractPdfText } from "@/lib/pdf/extract";
 import { chunkText, upsertChunks, type RagChunk } from "@/lib/rag/vector";
 import { hasAnthropic, hasOpenAI, hasUpstash, hasNeon } from "@/lib/env";
+import {
+  BudgetExceededError,
+  budgetExceededResponse,
+  guardSpend,
+  releaseReservation,
+  researchReserveUsd,
+  settleChatSpend,
+  tokensFromUsage,
+} from "@/lib/budget";
 
 /** PDF.js / unpdf need Node APIs — not Edge. */
 export const runtime = "nodejs";
@@ -91,9 +100,16 @@ export async function POST(req: Request) {
     let upserted = 0;
     let ragError: string | undefined;
     if (hasUpstash() && hasOpenAI()) {
-      const result = await upsertChunks(ragChunks);
-      upserted = result.upserted;
-      ragError = result.error;
+      try {
+        const result = await upsertChunks(ragChunks, { surface: "admin" });
+        upserted = result.upserted;
+        ragError = result.error;
+      } catch (error) {
+        if (error instanceof BudgetExceededError) {
+          return budgetExceededResponse(error.message);
+        }
+        throw error;
+      }
     } else {
       const need: string[] = [];
       if (!hasUpstash()) need.push("UPSTASH_VECTOR_REST_URL/TOKEN");
@@ -130,7 +146,78 @@ export async function POST(req: Request) {
     // Non-onboarding CV uploads still enrich structured profile when Anthropic is available.
     if (!runOnboarding && kind === "cv" && hasAnthropic()) {
       try {
-        const { output } = await generateText({
+        const gated = await guardSpend({
+          surface: "admin",
+          reserveUsd: researchReserveUsd(),
+        });
+        if (!gated.ok) {
+          // Skip enrichment when budget exhausted; document already saved.
+        } else {
+          try {
+            const { output, usage } = await generateText({
+              model: getLanguageModel(),
+              output: Output.object({
+                schema: z.object({
+                  structured: z.object({
+                    skills: z.array(z.string()).default([]),
+                    roles: z.array(z.string()).default([]),
+                    industries: z.array(z.string()).default([]),
+                    locations: z.array(z.string()).default([]),
+                    languages: z.array(z.string()).default([]),
+                    highlights: z.array(z.string()).default([]),
+                  }),
+                  publicBio: z.string().optional(),
+                }),
+              }),
+              prompt: `Parse this CV into structured profile fields for Peter.
+Return skills, roles, industries, locations, languages, highlights.
+Optionally improve a visitor-safe publicBio (2-4 sentences, no private contacts).
+
+${description ? `Uploader note: ${description}\n` : ""}
+CV:
+"""
+${contentText.slice(0, 24000)}
+"""`,
+            });
+            const tokens = tokensFromUsage(usage);
+            await settleChatSpend({
+              surface: "admin",
+              reservedUsd: gated.reserved,
+              inputTokens: tokens.inputTokens,
+              outputTokens: tokens.outputTokens,
+            });
+            if (output) {
+              const existing = await getProfile();
+              await updateProfile({
+                structured: {
+                  ...(existing?.structured ?? {}),
+                  ...output.structured,
+                  lastCvFilename: file.name,
+                  lastCvIngestedAt: new Date().toISOString(),
+                },
+                public_bio: output.publicBio,
+              });
+            }
+          } catch {
+            await releaseReservation("admin", gated.reserved);
+            // Profile enrichment is best-effort for library uploads
+          }
+        }
+      } catch {
+        // Profile enrichment is best-effort for library uploads
+      }
+    }
+
+    if (runOnboarding && hasAnthropic()) {
+      const gated = await guardSpend({
+        surface: "admin",
+        reserveUsd: researchReserveUsd(),
+      });
+      if (!gated.ok) {
+        return gated.response;
+      }
+      try {
+        const { output, usage } = await generateText({
           model: getLanguageModel(),
           output: Output.object({
             schema: z.object({
@@ -142,54 +229,11 @@ export async function POST(req: Request) {
                 languages: z.array(z.string()).default([]),
                 highlights: z.array(z.string()).default([]),
               }),
-              publicBio: z.string().optional(),
+              publicBio: z.string(),
+              questions: z.array(z.string()).length(5),
             }),
           }),
-          prompt: `Parse this CV into structured profile fields for Peter.
-Return skills, roles, industries, locations, languages, highlights.
-Optionally improve a visitor-safe publicBio (2-4 sentences, no private contacts).
-
-${description ? `Uploader note: ${description}\n` : ""}
-CV:
-"""
-${contentText.slice(0, 24000)}
-"""`,
-        });
-        if (output) {
-          const existing = await getProfile();
-          await updateProfile({
-            structured: {
-              ...(existing?.structured ?? {}),
-              ...output.structured,
-              lastCvFilename: file.name,
-              lastCvIngestedAt: new Date().toISOString(),
-            },
-            public_bio: output.publicBio,
-          });
-        }
-      } catch {
-        // Profile enrichment is best-effort for library uploads
-      }
-    }
-
-    if (runOnboarding && hasAnthropic()) {
-      const { output } = await generateText({
-        model: getLanguageModel(),
-        output: Output.object({
-          schema: z.object({
-            structured: z.object({
-              skills: z.array(z.string()).default([]),
-              roles: z.array(z.string()).default([]),
-              industries: z.array(z.string()).default([]),
-              locations: z.array(z.string()).default([]),
-              languages: z.array(z.string()).default([]),
-              highlights: z.array(z.string()).default([]),
-            }),
-            publicBio: z.string(),
-            questions: z.array(z.string()).length(5),
-          }),
-        }),
-        prompt: `You are Peter's Data storage + CEO onboarding helper.
+          prompt: `You are Peter's Data storage + CEO onboarding helper.
 Parse this CV text and return:
 - structured profile fields
 - a visitor-safe publicBio (2-4 sentences, no private contacts/salary)
@@ -200,12 +244,26 @@ CV:
 """
 ${contentText.slice(0, 24000)}
 """`,
-      });
+        });
+        const tokens = tokensFromUsage(usage);
+        await settleChatSpend({
+          surface: "admin",
+          reservedUsd: gated.reserved,
+          inputTokens: tokens.inputTokens,
+          outputTokens: tokens.outputTokens,
+        });
 
-      if (output) {
-        structured = output.structured;
-        publicBio = output.publicBio;
-        questions = output.questions;
+        if (output) {
+          structured = output.structured;
+          publicBio = output.publicBio;
+          questions = output.questions;
+        }
+      } catch (error) {
+        await releaseReservation("admin", gated.reserved);
+        if (error instanceof BudgetExceededError) {
+          return budgetExceededResponse(error.message);
+        }
+        throw error;
       }
     } else if (runOnboarding) {
       questions = [
@@ -235,16 +293,23 @@ ${contentText.slice(0, 24000)}
       });
 
       if (publicBio && hasUpstash() && hasOpenAI()) {
-        await upsertChunks([
-          {
-            id: `public-bio-${documentId}`,
-            text: publicBio,
-            visibility: "public",
-            source: "public-bio",
-            kind: "bio",
-            documentId,
-          },
-        ]);
+        try {
+          await upsertChunks(
+            [
+              {
+                id: `public-bio-${documentId}`,
+                text: publicBio,
+                visibility: "public",
+                source: "public-bio",
+                kind: "bio",
+                documentId,
+              },
+            ],
+            { surface: "admin" },
+          );
+        } catch (error) {
+          if (!(error instanceof BudgetExceededError)) throw error;
+        }
       }
     }
 

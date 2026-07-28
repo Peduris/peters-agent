@@ -19,6 +19,14 @@ import {
   classifyVisitorInterest,
   shouldFlagInterest,
 } from "@/lib/ai/interest";
+import {
+  BudgetExceededError,
+  guardSpend,
+  releaseReservation,
+  researchReserveUsd,
+  settleChatSpend,
+  tokensFromUsage,
+} from "@/lib/budget";
 
 export { ADMIN_CEO_SESSION_ID } from "@/lib/ai/session-ids";
 
@@ -150,9 +158,15 @@ async function formulatePublicReply(input: {
   const fallback = input.answer.trim();
   if (!hasAnthropic()) return fallback;
 
+  const gated = await guardSpend({
+    surface: "admin",
+    reserveUsd: researchReserveUsd(),
+  });
+  if (!gated.ok) return fallback;
+
   try {
     const skill = loadSkillMarkdown("public-orchestrator");
-    const { text } = await generateText({
+    const { text, usage } = await generateText({
       model: getLanguageModel(),
       system: `${skill}
 
@@ -169,8 +183,16 @@ ${input.answer}
 
 Write the public reply only.`,
     });
+    const tokens = tokensFromUsage(usage);
+    await settleChatSpend({
+      surface: "admin",
+      reservedUsd: gated.reserved,
+      inputTokens: tokens.inputTokens,
+      outputTokens: tokens.outputTokens,
+    });
     return text.trim() || fallback;
   } catch {
+    await releaseReservation("admin", gated.reserved);
     return fallback;
   }
 }
@@ -210,16 +232,24 @@ export async function resolveAndDeliver(input: {
   let ragUpserted = 0;
   const storePublic = input.storePublicRag !== false;
   if (storePublic && hasUpstash() && hasOpenAI()) {
-    const result = await upsertChunks([
-      {
-        id: `pending-answer-${pending.id}`,
-        text: `Visitor question: ${pending.question}\nPublic answer: ${answer}`,
-        visibility: "public",
-        source: "pending-answer",
-        kind: "faq",
-      },
-    ]);
-    ragUpserted = result.upserted;
+    try {
+      const result = await upsertChunks(
+        [
+          {
+            id: `pending-answer-${pending.id}`,
+            text: `Visitor question: ${pending.question}\nPublic answer: ${answer}`,
+            visibility: "public",
+            source: "pending-answer",
+            kind: "faq",
+          },
+        ],
+        { surface: "admin" },
+      );
+      ragUpserted = result.upserted;
+    } catch (error) {
+      if (!(error instanceof BudgetExceededError)) throw error;
+      // Budget exhausted — still deliver the reply without RAG write.
+    }
   }
 
   const ok = await resolvePendingQuestion(input.pendingId, "answered", answer, {

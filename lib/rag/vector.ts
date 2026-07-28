@@ -1,6 +1,7 @@
 import { Index } from "@upstash/vector";
 import { env, hasUpstash } from "@/lib/env";
 import { embedQuery, embedTexts } from "@/lib/rag/embeddings";
+import type { SpendSurface } from "@/lib/budget";
 
 export type RagChunk = {
   id: string;
@@ -36,13 +37,17 @@ export function chunkText(text: string, size = 800, overlap = 120): string[] {
 
 export async function upsertChunks(
   chunks: RagChunk[],
+  opts?: { surface?: SpendSurface },
 ): Promise<{ upserted: number; error?: string }> {
   const index = getIndex();
   if (!index) {
     return { upserted: 0, error: "Upstash Vector is not configured." };
   }
 
-  const embeddings = await embedTexts(chunks.map((c) => c.text));
+  const embeddings = await embedTexts(
+    chunks.map((c) => c.text),
+    opts?.surface ? { surface: opts.surface } : undefined,
+  );
   if (!embeddings) {
     return {
       upserted: 0,
@@ -93,13 +98,18 @@ export async function queryRag(input: {
   query: string;
   topK?: number;
   visibility?: "public" | "private" | "any";
+  /** Bill embeddings to this spend surface when set. */
+  spendSurface?: SpendSurface;
 }): Promise<{ hits: Array<{ text: string; score: number; visibility: string }>; error?: string }> {
   const index = getIndex();
   if (!index) {
     return { hits: [], error: "Upstash Vector is not configured." };
   }
 
-  const vector = await embedQuery(input.query);
+  const vector = await embedQuery(
+    input.query,
+    input.spendSurface ? { surface: input.spendSurface } : undefined,
+  );
   if (!vector) {
     return { hits: [], error: "OPENAI_API_KEY is required for RAG query embeddings." };
   }
